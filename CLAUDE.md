@@ -77,7 +77,7 @@ web/api/                         JSON API routers (added by work items)
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
-holdout/                         empty; the factory puts hidden acceptance tests here when it runs them
+holdout/                         not in the repository; the factory puts hidden acceptance tests here when it runs them
 execution/smoke.mjs              browser smoke test
 tools/                           balance simulator, sprite drawing, classic screenshot tour
 ```
