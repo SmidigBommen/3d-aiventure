@@ -13,6 +13,7 @@ from web.game_session import (
     get_primary_modifier,
 )
 from web.dependencies import require_character
+from web import world
 from engine import campaign as campaign_rules
 from engine.events import pick_event, resolve_event_choice, scaled_dc
 from engine.leveling import grant_xp
@@ -25,9 +26,9 @@ templates = Jinja2Templates(directory=Path(__file__).parent.parent / "templates"
 EVENT_CHANCE = 0.65
 
 
-def _can_rest(area) -> bool:
-    special = str(area.get("special", "")).lower() if area else ""
-    return "rest" in special or "inn" in special or "tavern" in special
+# Shared with the JSON API (web/world.py); the old names stay for this file and its tests.
+_can_rest = world.can_rest
+_danger = world.danger_band
 
 
 def location_tier(location) -> int:
@@ -55,16 +56,6 @@ def _boss_panel(session):
         "locked_text": boss.get("locked_text", "The way is barred. Something else must fall first."),
         "shard": boss.get("shard"),
     }
-
-
-def _danger(area) -> str:
-    """Danger band of an area from its 0-10 encounter rating."""
-    encounters = area.get("encounters", 0)
-    if encounters <= 0:
-        return "safe"
-    if encounters <= 2:
-        return "low"
-    return "med" if encounters <= 5 else "high"
 
 
 def build_area_map(location, current_area, defeated_bosses) -> dict:
@@ -106,7 +97,6 @@ def build_area_map(location, current_area, defeated_bosses) -> dict:
 
     nodes = []
     for aid, area in areas.items():
-        special = str(area.get("special", "")).lower()
         boss_id = area.get("boss")
         nodes.append({
             "id": aid,
@@ -116,7 +106,7 @@ def build_area_map(location, current_area, defeated_bosses) -> dict:
             "current": aid == current_id,
             "reachable": aid in reachable,
             "danger": _danger(area),
-            "shop": "shop" in special,
+            "shop": world.has_shop(area),
             "rest": _can_rest(area),
             "boss": bool(boss_id) and boss_id in bosses and boss_id not in defeated_bosses,
             "boss_defeated": bool(boss_id) and boss_id in defeated_bosses,
@@ -140,21 +130,14 @@ def build_area_map(location, current_area, defeated_bosses) -> dict:
 async def game_view(request: Request, session=Depends(require_character)):
     """Main game view - show current location."""
 
-    # Check if in battle
-    if session.battle.is_active:
-        return RedirectResponse("/battle", status_code=303)
-    if session.character.current_hit_points <= 0:
-        return RedirectResponse("/battle/defeat", status_code=303)
-    if session.pending_event or session.event_result:
-        return RedirectResponse("/game/event", status_code=303)
+    # A battle, a defeat or an event comes first
+    waiting = world.pending(session)
+    if waiting:
+        return RedirectResponse(waiting["url"], status_code=303)
 
     char_data = session.serialize_character()
     location = session.current_location
     area = session.current_area
-
-    # Check if shop is available (special can be a string like "shop_location")
-    special = area.get("special", "") if area else ""
-    has_shop = "shop" in str(special).lower()
 
     message = session.pop_flash("game_message")
     if message:
@@ -168,7 +151,7 @@ async def game_view(request: Request, session=Depends(require_character)):
         "area": area,
         "area_map": build_area_map(location, area, session.defeated_bosses),
         "danger": _danger(area) if area else "safe",
-        "has_shop": has_shop,
+        "has_shop": world.has_shop(area),
         "can_rest": _can_rest(area),
         "act": session.act,
         "boss": _boss_panel(session),
@@ -180,16 +163,8 @@ async def game_view(request: Request, session=Depends(require_character)):
 async def move_to_area(request: Request, area_id: str = Form(...), session=Depends(require_character)):
     """Move to a connected area."""
 
-    location = session.current_location
-    current_area = session.current_area
-
-    # Verify the area is connected
-    if current_area and area_id in current_area.get("connections", []):
-        for area in location.get("areas", []):
-            if area["id"] == area_id:
-                session.current_area = area
-                save_session(request, session)
-                break
+    if world.move_to_area(session, area_id):
+        save_session(request, session)
 
     return RedirectResponse("/game", status_code=303)
 

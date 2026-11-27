@@ -5,16 +5,46 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AIVentures 3D: The Shattered Crown</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
   <canvas id="view"></canvas>
+  <div id="veil"></div>
+
+  <div id="hud" hidden>
+    <div class="hud-box hud-place">
+      <div id="hud-location"></div>
+      <div class="hud-area-line"><span id="hud-area"></span><span id="hud-danger" class="danger"></span></div>
+      <p id="hud-description"></p>
+    </div>
+    <div class="hud-box" id="hud-character"></div>
+    <div class="hud-box" id="hud-keys">WASD / arrows: move · Mouse: look (click the view) · M or Esc: menu</div>
+  </div>
+
   <div id="ui">
     <div id="title-screen" class="panel">
       <h1>AIVentures</h1>
       <p class="tagline">The Shattered Crown</p>
-      <a class="btn" id="play-classic" href="/classic">Play</a>
-      <p class="hint">The 3D world is under construction. Play opens the classic interface.</p>
+      <p id="title-message" hidden></p>
+      <a class="btn" id="btn-new-game" href="/character/new" hidden>New game</a>
+      <button class="btn" id="btn-continue" type="button" hidden>Continue</button>
+      <a class="btn" id="pending-link" href="/classic" hidden></a>
+      <a class="btn" id="classic-link" href="/classic" hidden>Classic interface</a>
+    </div>
+
+    <div id="menu" class="panel" hidden>
+      <h2>Menu</h2>
+      <nav>
+        <a id="menu-location" href="/game">Location (explore, rest, shop, travel)</a>
+        <a id="menu-inventory" href="/inventory">Inventory</a>
+        <a id="menu-character" href="/character/summary">Character</a>
+        <a id="menu-journal" href="/game/journal">Journal</a>
+        <a id="menu-saves" href="/saves">Saves</a>
+      </nav>
+      <button class="btn" id="menu-back" type="button">Back to the world</button>
     </div>
   </div>
   <script type="module" src="/src/main.ts"></script>

@@ -92,10 +92,60 @@ async function canvasVariety() {
   }, png.toString('base64'));
 }
 
-try {
-  // 1. The 3D client loads and draws.
+/** Waits for the 3D view to draw something, then saves the screenshot. */
+async function worldShot(name) {
+  await page.waitForFunction(() => window.__aiv.frames > 5, null, { timeout: 30000 });
+  let variety = 0;
+  for (let i = 0; i < 10 && variety < 0.05; i++) {
+    await page.waitForTimeout(300);
+    variety = await canvasVariety();
+  }
+  await shot(name);
+  if (variety < 0.05) errors.push(`${name}: the 3D view is blank: only ${(variety * 100).toFixed(1)}% of sampled pixels differ from the background`);
+}
+
+/** A form POST from the page, so it carries the page's session cookie. Repeated fields are allowed. */
+async function post(path, fields) {
+  const result = await page.evaluate(async ([p, f]) => {
+    const r = await fetch(p, { method: 'POST', body: new URLSearchParams(f) });
+    await r.text(); // read to the end, or the next navigation aborts the request
+    return { ok: r.ok, status: r.status };
+  }, [path, fields]);
+  if (!result.ok) throw new Error(`POST ${path} answered ${result.status}`);
+}
+
+/** Opens / and waits for the title panel to offer Continue. */
+async function openTitle() {
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
   await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.frames > 5, null, { timeout: 30000 });
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
+}
+
+/** Clicks Continue and waits for the world; checks that the HUD names the area the server reported. */
+async function enterWorld() {
+  await page.click('#btn-continue');
+  await page.waitForFunction(() => window.__aiv.screen === 'world' && window.__aiv.layout && window.__aiv.player, null, { timeout: 10000 });
+  const { area, location } = await page.evaluate(() => window.__aiv.state);
+  const shown = await page.textContent('#hud-area');
+  if (shown !== area.name) errors.push(`the HUD shows "${shown}", the server says "${area.name}"`);
+  return { area, location };
+}
+
+/** Travels through the classic route, then enters the world there. */
+async function travelAndEnter(locationName, name) {
+  await post('/game/travel', [['location_name', locationName]]);
+  await openTitle();
+  const { location } = await enterWorld();
+  if (location.name !== locationName) errors.push(`travelled to ${locationName} but the world shows ${location.name}`);
+  await worldShot(name);
+}
+
+try {
+  // 1. The 3D client loads and draws; without a character it offers a new game.
+  await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.frames > 5, null, { timeout: 30000 });
+  await page.waitForSelector('#btn-new-game', { state: 'visible', timeout: 10000 });
+  if (await page.isVisible('#btn-continue')) errors.push('Continue is offered without a character');
   await page.waitForTimeout(500);
   const variety = await canvasVariety();
   await shot('title');
@@ -105,6 +155,57 @@ try {
   await page.goto(`${url}/classic`, { waitUntil: 'load', timeout: 30000 });
   await page.waitForSelector('.home-hero', { timeout: 10000 });
   await shot('classic-home');
+
+  // 3. A character, made through the classic routes in this browser.
+  await post('/character/race', [['race', 'Human']]);
+  await post('/character/class', [['class_name', 'Fighter']]);
+  await post('/character/create', [['name', 'Smoke'], ['weapon', 'Longsword'], ['armor', 'Chain Mail'], ['skills', 'Athletics'], ['skills', 'Perception']]);
+
+  // 4. The title screen now offers to continue.
+  await openTitle();
+  if (await page.isVisible('#btn-new-game')) errors.push('New game is still offered with a character');
+  await shot('title-continue');
+
+  // 5. Into the world, in the town the character starts in.
+  await enterWorld();
+  await worldShot('world-town');
+
+  // 6. Walk through the first gate with the W key held down.
+  const gate = await page.evaluate(() => {
+    const g = window.__aiv.layout.gates[0];
+    window.__aiv.lookAt(g.x, g.z);
+    return g;
+  });
+  await page.keyboard.down('KeyW');
+  await page.waitForFunction((id) => window.__aiv.state.area.id === id && window.__aiv.screen === 'world', gate.exitId, { timeout: 30000 });
+  await page.keyboard.up('KeyW');
+  const served = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
+  if (served.area.id !== gate.exitId) errors.push(`walked to ${gate.exitId} but the server says ${served.area.id}`);
+  const shownArea = await page.textContent('#hud-area');
+  if (shownArea !== served.area.name) errors.push(`after the gate the HUD shows "${shownArea}", the server says "${served.area.name}"`);
+  await worldShot('world-after-gate');
+
+  // 7. The menu.
+  await page.keyboard.press('KeyM');
+  await page.waitForSelector('#menu', { state: 'visible', timeout: 5000 });
+  if (!(await page.evaluate(() => window.__aiv.menuOpen))) errors.push('the menu is visible but __aiv.menuOpen is false');
+  await shot('menu');
+
+  // 8. From the menu to the classic location page, which is in the area just walked to.
+  await Promise.all([page.waitForURL(/\/game\/?$/, { timeout: 30000 }), page.click('#menu-location')]);
+  await page.waitForSelector('.nav-3d', { timeout: 10000 });
+  if (!(await page.content()).includes(served.area.name)) errors.push(`the classic location page does not name ${served.area.name}`);
+  await shot('classic-location');
+
+  // 9. And back through the link in the classic navigation.
+  await Promise.all([page.waitForURL((u) => u.pathname === '/', { timeout: 30000 }), page.click('.nav-3d')]);
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready, null, { timeout: 30000 });
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
+  await shot('title-return');
+
+  // 10 and 11. The other two kinds of place.
+  await travelAndEnter('Whispering Woods', 'world-wilderness');
+  await travelAndEnter('Abandoned Watchtower', 'world-dungeon');
 } catch (e) {
   errors.push(String(e));
   await shot('failure').catch(() => {});
