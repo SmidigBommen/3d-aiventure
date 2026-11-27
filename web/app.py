@@ -57,11 +57,6 @@ app.include_router(shop.router, prefix="/shop", tags=["shop"])
 app.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
 app.include_router(saves.router, prefix="/saves", tags=["saves"])
 
-# JSON API for the 3D client
-from web.api import world as world_api
-
-app.include_router(world_api.router, prefix="/api", tags=["api"])
-
 
 # The 3D client (built by `pnpm build` into client/dist) is served at /. Each of its top-level
 # entries gets a route of its own; one catch-all mount at / would swallow the redirect from

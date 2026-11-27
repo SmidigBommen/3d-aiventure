@@ -82,21 +82,6 @@ execution/smoke.mjs              browser smoke test
 tools/                           balance simulator, sprite drawing, classic screenshot tour
 ```
 
-## The 3D world so far
-
-- `GET /api/state` (read-only) and `POST /api/move` are in `web/api/world.py`. The move, the danger
-  band, the shop/rest tests and the pending check (battle, defeat, event) are in `web/world.py`;
-  the classic routes in `web/routes/game.py` call the same functions.
-- `client/src/world/layout.ts` turns an area into a floor plan (`buildLayout`): floor size, one gate
-  per exit, solid walls and props, spawn points. It keeps the straight line from the default spawn
-  to every gate clear. `collision.ts` holds `moveWithCollision` and `gateAt`; `walk.ts` holds one
-  frame of walking and turning. All three are pure; `testkit.ts` holds the measuring helpers of
-  their tests.
-- `client/src/world/areaScene.ts` draws a layout, `client/src/ui.ts` fills the HTML panels,
-  `client/src/main.ts` holds the screens (title, world, pending), the input and the frame loop.
-- Battles, events, shop, inventory and travel still happen on the classic pages, reached from the
-  menu (M or Esc); the classic navigation links back with "3D world".
-
 ## Classic application (the code this repository started from)
 
 Everything below describes the Python rules engine and the server-rendered interface copied from AIVentures. The rules engine stays. The server-rendered pages are replaced screen by screen and removed at the end.
