@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFLoader, type GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 // Loads the models under /models. Every file is asked for at most once per page load, also when it
 // failed; the geometry and materials of a loaded model are shared by everything drawn from it.
@@ -16,9 +17,33 @@ export interface Model {
   box: THREE.Box3;
 }
 
+/** A model that stands on its own and may move: copies of the file's scene, and its clips. */
+export interface Figure {
+  /** A fresh copy on every call; geometry and materials are shared with the other copies. */
+  instance: () => THREE.Object3D;
+  clips: THREE.AnimationClip[];
+}
+
 const loader = new GLTFLoader();
+const files = new Map<string, Promise<GLTF | null>>();
 const cache = new Map<string, Promise<Model | null>>();
 const errors: string[] = [];
+
+/** The file of a model, asked for once; a failure is recorded once. */
+function loadFile(key: string): Promise<GLTF | null> {
+  let pending = files.get(key);
+  if (!pending) {
+    pending = loader.loadAsync(`/models/${key}.glb`).then(
+      (gltf) => gltf,
+      () => {
+        errors.push(key);
+        return null;
+      },
+    );
+    files.set(key, pending);
+  }
+  return pending;
+}
 
 /** Keys of the models that could not be loaded since the page was opened. */
 export function modelErrors(): string[] {
@@ -53,16 +78,20 @@ function toModel(scene: THREE.Object3D): Model {
 export function loadModel(key: string): Promise<Model | null> {
   let pending = cache.get(key);
   if (!pending) {
-    pending = loader.loadAsync(`/models/${key}.glb`).then(
-      (gltf) => toModel(gltf.scene),
-      () => {
-        errors.push(key);
-        return null;
-      },
-    );
+    pending = loadFile(key).then((gltf) => (gltf ? toModel(gltf.scene) : null));
     cache.set(key, pending);
   }
   return pending;
+}
+
+/** The models with these keys as figures: creatures and whatever else stands alone. A failed one is null. */
+export async function loadFigures(keys: Iterable<string>): Promise<Map<string, Figure | null>> {
+  const unique = [...new Set(keys)];
+  const loaded = await Promise.all(unique.map(loadFile));
+  return new Map(unique.map((key, i): [string, Figure | null] => {
+    const gltf = loaded[i];
+    return [key, gltf ? { instance: () => cloneSkinned(gltf.scene), clips: gltf.animations } : null];
+  }));
 }
 
 export async function loadModels(keys: Iterable<string>): Promise<Map<string, Model | null>> {

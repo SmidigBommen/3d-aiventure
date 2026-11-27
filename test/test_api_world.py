@@ -194,7 +194,9 @@ class TestMove:
         assert response.json()["area"]["is_boss_area"] is bool(moved.get("boss"))
         after = load(client)
         assert after["area_id"] == target
-        assert {k: v for k, v in after.items() if k != "area_id"} == {k: v for k, v in before.items() if k != "area_id"}
+        moving = ("area_id", "area_contents")
+        assert {k: v for k, v in after.items() if k not in moving} == {k: v for k, v in before.items() if k not in moving}
+        assert after["area_contents"]["area_id"] == target and after["area_contents"]["seq"] == 1
         name = next(a["name"] for a in loc["areas"] if a["id"] == target)
         assert name in client.get("/game").text
 

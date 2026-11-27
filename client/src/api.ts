@@ -1,5 +1,7 @@
 // The server's JSON API. The server decides everything; this only carries it.
 
+import type { AreaContents } from './world/contents';
+
 export type Danger = 'safe' | 'low' | 'med' | 'high';
 
 export interface WorldState {
@@ -31,6 +33,7 @@ export interface WorldState {
   } | null;
   exits: { id: string; name: string; danger: Danger }[];
   pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
+  contents?: AreaContents | null; // what the area holds; null until the server has rolled it
 }
 
 export type MoveAnswer = { ok: true; state: WorldState } | { ok: false; error: string; message: string };
@@ -41,18 +44,44 @@ export async function fetchState(): Promise<WorldState> {
   return (await response.json()) as WorldState;
 }
 
-export async function postMove(areaId: string): Promise<MoveAnswer> {
+type Refusal = { ok: false; error: string; message: string };
+
+async function post<T>(path: string, body?: unknown): Promise<{ ok: true; value: T } | Refusal> {
   try {
-    const response = await fetch('/api/move', {
+    const response = await fetch(path, {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ area_id: areaId }),
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const body = await response.json();
-    if (response.ok) return { ok: true, state: body as WorldState };
-    return { ok: false, error: String(body.error), message: String(body.message) };
+    const answer = await response.json();
+    if (response.ok) return { ok: true, value: answer as T };
+    return { ok: false, error: String(answer.error), message: String(answer.message) };
   } catch {
     return { ok: false, error: 'network', message: 'The server did not answer.' };
   }
+}
+
+const asState = (answer: { ok: true; value: WorldState } | Refusal): MoveAnswer => (answer.ok ? { ok: true, state: answer.value } : answer);
+
+export async function postMove(areaId: string): Promise<MoveAnswer> {
+  return asState(await post<WorldState>('/api/move', { area_id: areaId }));
+}
+
+/** Arriving in the current area: the server rolls what it holds when it has not yet. */
+export async function postEnter(): Promise<MoveAnswer> {
+  return asState(await post<WorldState>('/api/enter'));
+}
+
+/** Searching the area further: a new roll. */
+export async function postSearch(): Promise<MoveAnswer> {
+  return asState(await post<WorldState>('/api/search'));
+}
+
+export type EngageAnswer = { ok: true; url: string; state: WorldState } | Refusal;
+
+/** Meeting the monster, event or boss with this id. Answers the page on which the encounter goes on. */
+export async function postEngage(id: string): Promise<EngageAnswer> {
+  const answer = await post<{ url: string; state: WorldState }>('/api/engage', { id });
+  return answer.ok ? { ok: true, url: answer.value.url, state: answer.value.state } : answer;
 }

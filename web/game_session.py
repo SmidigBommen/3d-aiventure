@@ -196,6 +196,17 @@ def get_events() -> dict:
     return _events_cache
 
 
+_event_objects_cache = None
+
+
+def get_event_objects() -> dict:
+    """Get what each exploration event looks like in the 3D world: {event id: {"object", "label"}}."""
+    global _event_objects_cache
+    if _event_objects_cache is None:
+        _event_objects_cache = load_json("event_objects.json")
+    return _event_objects_cache
+
+
 def get_class_abilities(class_name: str, level: int) -> list:
     """Get unlocked abilities for a class at a given level."""
     abilities = get_abilities()
@@ -358,6 +369,9 @@ class GameSession:
         self.event_result = None      # result dict of the last resolved event (shown once)
         self.completed_events = []    # ids of one-time events already resolved
         self.events_resolved = 0      # lifetime counter for the journal
+        # What waits in the area the character stands in (web/world.py): one monster or one event, not yet met
+        self.area_contents = None     # {"location", "area_id", "seq", "monster", "event"}
+        self.return_to_3d = False     # the last encounter was started from the 3D world
         # Flash messages (one-time display, cleared after read)
         self._flash = {}
 
@@ -414,6 +428,8 @@ class GameSession:
             "event_result": self.event_result,
             "completed_events": self.completed_events,
             "events_resolved": self.events_resolved,
+            "area_contents": self.area_contents,
+            "return_to_3d": self.return_to_3d,
             "_flash": self._flash,
         }
 
@@ -543,6 +559,8 @@ class GameSession:
         session.event_result = data.get("event_result")
         session.completed_events = data.get("completed_events", [])
         session.events_resolved = data.get("events_resolved", 0)
+        session.area_contents = data.get("area_contents")
+        session.return_to_3d = bool(data.get("return_to_3d", False))
         session._flash = data.get("_flash", {})
 
         # Restore location from campaign data

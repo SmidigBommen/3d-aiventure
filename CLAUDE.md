@@ -84,7 +84,8 @@ tools/                           balance simulator, sprite drawing, classic scre
 
 ## The 3D world so far
 
-- `GET /api/state` (read-only) and `POST /api/move` are in `web/api/world.py`. The move, the danger
+- `GET /api/state` (read-only) and `POST /api/move` are in `web/api/world.py` (with the encounter
+  routes, see "What an area holds"). The move, the danger
   band, the shop/rest tests and the pending check (battle, defeat, event) are in `web/world.py`;
   the classic routes in `web/routes/game.py` call the same functions.
 - `client/src/world/layout.ts` turns an area into a floor plan (`buildLayout`): floor size, one gate
@@ -124,12 +125,58 @@ tools/                           balance simulator, sprite drawing, classic scre
   pending), the input and the frame loop. Entering an area is asynchronous: `#loading` is shown
   and nobody walks until the models are in and the scene is built.
 - `window.__aiv`: `ready`, `frames`, `screen`, `state`, `player`, `layout` (the dressing's
-  layout), `menuOpen`, `loading`, `modelErrors`, `dressing`, `triangles` (drawn in the last
-  frame), and the action `lookAt(x, z)`.
+  layout, with `slots`), `menuOpen`, `loading`, `modelErrors`, `dressing`, `triangles` (drawn in
+  the last frame), `contents`, `interaction`, `prompt`, and the actions `lookAt(x, z)` and
+  `interact()` (what the E key runs).
 - The smoke test visits all eight locations with `--serve` (it marks every boss defeated in its
-  own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1.
-- Battles, events, shop, inventory and travel still happen on the classic pages, reached from the
-  menu (M or Esc); the classic navigation links back with "3D world".
+  own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1. With `--serve` it also
+  plants a monster and an event in its session file (`plant`), meets them, and searches; in both
+  modes it walks up to the first boss without starting the fight. `walkTo(slot, range)` finds a way
+  around what stands on the floor.
+- Shop, inventory and travel still happen on the classic pages, reached from the menu (M or Esc);
+  the classic navigation links back with "3D world". Battles and events are met in the world and
+  played on the classic pages (below).
+
+### What an area holds
+
+- **The roll** is `world.roll_explore(session)` in `web/world.py`: a monster (race, level, name,
+  class, weapon drawn by `pick_monster` in `web/routes/battle.py`, nothing built), an event id, or
+  nothing, with the odds of classic Explore. It is the first use of `random` in a request and the
+  only place this roll exists. `world.roll_contents(session)` stores it.
+- **Session**: `area_contents` (`{"location", "area_id", "seq", "monster", "event"}`, at most one of
+  monster and event, `seq` up by one per roll) and `return_to_3d`. Contents that name another area
+  count as not rolled (`world.stored_contents`). They are rolled by `move_to_area`, classic travel,
+  revive, `POST /api/enter` (only when not rolled) and `POST /api/search`. Meeting something takes
+  it out (`take_monster`, `take_event`). The undefeated boss of the area is derived
+  (`world.area_boss`), never stored.
+- **API** (`web/api/world.py`): `POST /api/enter`, `POST /api/search` (refused `occupied` while a
+  monster or event is there, `nothing_to_find` without a search spot: `world.has_search_spot`) and
+  `POST /api/engage` with `{"id"}`, which answers `{"url", "state"}`: `/battle` for a monster
+  (`begin_monster_battle`) or boss, `/game/event` for an event. The world state carries `contents`
+  (`seq`, `monster`, `event` with `object` and `label` from `json/event_objects.json`, `boss`,
+  `search_spot`). `GET /api/state` never rolls.
+- **Classic Explore** makes the same roll, stores it and meets it at once. `return_to_3d` is set by
+  engage and cleared by classic Explore and `POST /battle/boss`; while set, a successful flee, the
+  event's Continue, revive and the victory page's `#back-link` lead to `/`.
+- **Slots**: `dressArea(...).layout.slots` (`ContentSlots` in `layout.ts`; null from `buildLayout`)
+  gives the place of the monster, the event object, the search spot and the boss. `chooseSlots` in
+  `dressing.ts` picks them last: 5 m from spawn points and gates, 1.5 m inside the edge, 1 m clear
+  of solids, 4 m apart, reachable (its own flood fill), the monster, event and boss off the straight
+  lines to the gates. The arena is built around the boss's place (`bossSpot`), which later props
+  keep away from. `contents.test.ts` measures all of it for the campaign.
+- **`client/src/world/contents.ts`** (pure): `interactionAt(pos, layout, contents)` (what is within
+  3 m, its prompt, `auto` for a monster within 1.2 m, `locked` for a barred boss), `contentSolids`
+  (the event object and the boss block), and the tables `CREATURES` (race or boss id to model,
+  scale, tint, opacity), `EVENT_OBJECTS` (object kind to model and height) and `SEARCH_MARKERS`.
+  `MODELS.md` has the same tables.
+- **`client/src/world/contentScene.ts`** draws the contents on the slots: figures from
+  `loadFigures` (a copy of the file's scene, skinned, playing its idle clip), name plates as
+  sprites, the glow of an event object. `main.ts` rebuilds it when the contents change, walks in the
+  dressed layout plus `contentSolids`, shows `#prompt` and `#notice`, and runs E.
+- **Way back**: before `POST /api/engage` the client saves `{location, area, x, z, yaw}` under
+  `sessionStorage['aiv.return']` and goes to the answered `url`. When `/` loads with a matching
+  entry and nothing pending it posts `/api/enter`, skips the title screen and puts the player
+  there. Continue on the title screen posts `/api/enter` too.
 
 ## Classic application (the code this repository started from)
 

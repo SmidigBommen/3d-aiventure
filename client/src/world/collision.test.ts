@@ -17,6 +17,7 @@ const room: AreaLayout = {
   props: [{ kind: 'pillar', x: -5, z: 5, halfX: 0.5, halfZ: 0.5, height: 4 }],
   gates: [gate, { exitId: 'east', side: 'east', x: 10, z: 3, width: 3, spawn: { x: 7.5, z: 3 } }],
   spawn: { x: 0, z: 0 },
+  slots: null,
 };
 
 describe('moveWithCollision', () => {

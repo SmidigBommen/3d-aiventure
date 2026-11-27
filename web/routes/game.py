@@ -1,5 +1,4 @@
 import sys
-import random
 from pathlib import Path
 from fastapi import APIRouter, Request, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -15,7 +14,7 @@ from web.game_session import (
 from web.dependencies import require_character
 from web import world
 from engine import campaign as campaign_rules
-from engine.events import pick_event, resolve_event_choice, scaled_dc
+from engine.events import resolve_event_choice, scaled_dc
 from engine.leveling import grant_xp
 from skills import calculate_skill_modifier
 
@@ -42,18 +41,16 @@ def location_tier(location) -> int:
 
 def _boss_panel(session):
     """Display data for the boss guarding the current area, if any remains."""
-    bosses = get_bosses()
-    boss_id = campaign_rules.get_area_boss(session.current_area, bosses, session.defeated_bosses)
-    if not boss_id:
+    shown = world.area_boss(session)
+    if not shown:
         return None
-    boss = bosses[boss_id]
-    locked = bool(campaign_rules.missing_requirements(boss, session.defeated_bosses))
+    boss = get_bosses()[shown["id"]]
     return {
         "name": boss["name"],
         "title": boss.get("title", ""),
         "level": boss["level"],
-        "locked": locked,
-        "locked_text": boss.get("locked_text", "The way is barred. Something else must fall first."),
+        "locked": shown["locked"],
+        "locked_text": boss.get("locked_text", world.DEFAULT_LOCKED_TEXT),
         "shard": boss.get("shard"),
     }
 
@@ -173,26 +170,24 @@ async def move_to_area(request: Request, area_id: str = Form(...), session=Depen
 async def explore_area(request: Request, session=Depends(require_character)):
     """Explore the current area - may trigger an encounter or an event."""
 
+    if session.battle.is_active:
+        return RedirectResponse("/battle", status_code=303)
     area = session.current_area
     if not area or session.pending_event or session.character.current_hit_points <= 0:
         return RedirectResponse("/game", status_code=303)
 
-    # Check for encounter based on area's encounter rating (0-10)
-    encounter_chance = min(1.0, area.get("encounters", 5) / 5.0)  # Doubled encounter rate
-
-    if area.get("monster_types") and random.random() < encounter_chance:
-        # Start a battle
-        return RedirectResponse("/battle/start", status_code=303)
-
-    # No fight — maybe something more interesting than nothing
-    if random.random() < EVENT_CHANCE:
-        event_id = pick_event(
-            get_events(), session.current_location.get("type"),
-            area.get("special"), session.completed_events)
-        if event_id:
-            session.pending_event = event_id
-            save_session(request, session)
-            return RedirectResponse("/game/event", status_code=303)
+    # The roll (world.roll_explore) is stored as what the area holds and met at once
+    session.return_to_3d = False
+    world.roll_contents(session)
+    monster = world.take_monster(session)
+    if monster:
+        from web.routes.battle import begin_monster_battle, opened
+        return await opened(request, session, begin_monster_battle(session, monster))
+    event_id = world.take_event(session)
+    if event_id:
+        session.pending_event = event_id
+        save_session(request, session)
+        return RedirectResponse("/game/event", status_code=303)
 
     save_session(request, session)
     return RedirectResponse("/game?explored=true", status_code=303)
@@ -280,7 +275,7 @@ async def event_continue(request: Request, session=Depends(require_character)):
     save_session(request, session)
     if result and result.get("battle"):
         return RedirectResponse("/battle/start", status_code=303)
-    return RedirectResponse("/game", status_code=303)
+    return RedirectResponse("/" if session.return_to_3d else "/game", status_code=303)
 
 
 @router.post("/rest")
@@ -362,6 +357,7 @@ async def travel_to_location(request: Request, location_name: str = Form(...), s
             start_id = location.get("starting_area")
             session.current_area = next(
                 (a for a in areas if a["id"] == start_id), areas[0] if areas else None)
+            world.roll_contents(session)
 
             # The road is not always safe: a pursuing boss may strike mid-journey
             ambush = campaign_rules.pending_ambush(get_bosses(), act, session.defeated_bosses)

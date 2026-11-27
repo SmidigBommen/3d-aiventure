@@ -1,4 +1,4 @@
-"""JSON API for walking through the areas: the state of the world and the step to a connected area."""
+"""JSON API of the 3D world: its state, the step to a connected area, and meeting what an area holds."""
 
 import json
 
@@ -17,6 +17,9 @@ PENDING_MESSAGES = {
 }
 
 
+NO_CHARACTER = (409, "no_character", "You have no character yet. Start a new game first.")
+
+
 def _refuse(status: int, code: str, message: str) -> JSONResponse:
     return JSONResponse({"error": code, "message": message}, status_code=status)
 
@@ -32,7 +35,7 @@ async def move(request: Request):
     """Walk through a gate into a connected area. Answers with the new state."""
     session = get_session(request)
     if not session.character:
-        return _refuse(409, "no_character", "You have no character yet. Start a new game first.")
+        return _refuse(*NO_CHARACTER)
     try:
         body = json.loads(await request.body())
     except ValueError:
@@ -47,3 +50,80 @@ async def move(request: Request):
         return _refuse(400, "not_connected", "There is no way there from here.")
     save_session(request, session)
     return world.world_state(session)
+
+
+@router.post("/enter")
+async def enter(request: Request):
+    """Arrive in the current area: what it holds is rolled when that has not happened yet."""
+    session = get_session(request)
+    if not session.character:
+        return _refuse(*NO_CHARACTER)
+    if session.current_area and not world.stored_contents(session) and not world.pending(session):
+        world.roll_contents(session)
+        save_session(request, session)
+    return world.world_state(session)
+
+
+@router.post("/search")
+async def search(request: Request):
+    """Search the area further: a new roll for what it holds."""
+    session = get_session(request)
+    if not session.character:
+        return _refuse(*NO_CHARACTER)
+    waiting = world.pending(session)
+    if waiting:
+        return _refuse(409, "pending", PENDING_MESSAGES[waiting["kind"]])
+    contents = world.stored_contents(session)
+    if contents and (contents.get("monster") or contents.get("event")):
+        return _refuse(409, "occupied", "Deal with what is here before you search further.")
+    area = session.current_area
+    location = session.current_location
+    if not area or not world.has_search_spot(area, location.get("type"), session.completed_events):
+        return _refuse(409, "nothing_to_find", "There is nothing more to find here.")
+    world.roll_contents(session)
+    save_session(request, session)
+    return world.world_state(session)
+
+
+@router.post("/engage")
+async def engage(request: Request):
+    """Meet the monster, event or boss with this id. Answers where the encounter goes on."""
+    # Imported here: the battle routes import web.world, which this module imports too.
+    from web.routes.battle import begin_boss_battle, begin_monster_battle, opened
+
+    session = get_session(request)
+    if not session.character:
+        return _refuse(*NO_CHARACTER)
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        body = None
+    content_id = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(content_id, str):
+        return _refuse(400, "bad_request", "That is not something you can turn to.")
+    waiting = world.pending(session)
+    if waiting:
+        return _refuse(409, "pending", PENDING_MESSAGES[waiting["kind"]])
+
+    contents = world.stored_contents(session) or {}
+    monster = contents.get("monster")
+    event = contents.get("event")
+    boss = world.area_boss(session) if contents else None
+    if monster and monster["id"] == content_id:
+        session.return_to_3d = True
+        answer = await opened(request, session, begin_monster_battle(session, world.take_monster(session)))
+        url = answer.headers["location"]
+    elif event and event["id"] == content_id:
+        session.return_to_3d = True
+        session.pending_event = world.take_event(session)
+        save_session(request, session)
+        url = "/game/event"
+    elif boss and boss["id"] == content_id:
+        if boss["locked"]:
+            return _refuse(409, "locked", boss["locked_text"])
+        session.return_to_3d = True
+        answer = await opened(request, session, begin_boss_battle(session, content_id))
+        url = answer.headers["location"]
+    else:
+        return _refuse(404, "not_here", "That is not here any more.")
+    return {"url": url, "state": world.world_state(session)}

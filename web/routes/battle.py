@@ -35,6 +35,7 @@ from engine.quests import check_quest_progress
 from engine.combatant import CombatantState
 from engine import campaign as campaign_rules
 from web.dependencies import require_character, require_battle
+from web import world
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).parent.parent / "templates")
@@ -177,26 +178,41 @@ def begin_battle(session, monster_state: CombatantState, intro_lines=None) -> bo
     return char.current_hit_points > 0
 
 
-def begin_random_battle(session) -> bool:
-    """Start a fight against a random monster from the current area."""
-    area = session.current_area
-    monster_race, level = get_monster_for_area(area, session.current_location)
+def pick_monster(area, location=None) -> dict:
+    """Draw the monster met in an area: race, level, name, class and weapon. Builds nothing."""
+    monster_race, level = get_monster_for_area(area, location)
 
     factory = MonsterFactory()
     if monster_race not in factory.races:
         monster_race = "Goblin"
 
     race_data = factory.races[monster_race]
-    monster = factory.create_monster(
-        name=random.choice(race_data.get("names", [monster_race])),
-        race=monster_race,
-        class_name=random.choice(race_data.get("class_options", ["Fighter"])),
-        monster_level=level,
-        weapon_name=random.choice(race_data.get("weapons", [race_data.get("weapon_name", "Club")])),
+    return {
+        "race": monster_race,
+        "level": level,
+        "name": random.choice(race_data.get("names", [monster_race])),
+        "class_name": random.choice(race_data.get("class_options", ["Fighter"])),
+        "weapon": random.choice(race_data.get("weapons", [race_data.get("weapon_name", "Club")])),
+    }
+
+
+def begin_monster_battle(session, picked: dict) -> bool:
+    """Start a fight against a monster drawn by pick_monster()."""
+    monster = MonsterFactory().create_monster(
+        name=picked["name"],
+        race=picked["race"],
+        class_name=picked["class_name"],
+        monster_level=picked["level"],
+        weapon_name=picked["weapon"],
     )
     state = CombatantState.from_monster(monster)
-    state.abilities = list(get_monster_abilities()["races"].get(monster_race, []))
+    state.abilities = list(get_monster_abilities()["races"].get(picked["race"], []))
     return begin_battle(session, state)
+
+
+def begin_random_battle(session) -> bool:
+    """Start a fight against a random monster from the current area."""
+    return begin_monster_battle(session, pick_monster(session.current_area, session.current_location))
 
 
 def begin_boss_battle(session, boss_id: str) -> bool:
@@ -382,9 +398,13 @@ async def start_battle(request: Request, session=Depends(require_character)):
     if not area or not area.get("monster_types") or session.character.current_hit_points <= 0:
         return RedirectResponse("/game", status_code=303)
 
-    if not begin_random_battle(session):
-        return await end_battle(request, session, player_won=False)
+    return await opened(request, session, begin_random_battle(session))
 
+
+async def opened(request: Request, session, player_stands: bool):
+    """Answer for a fight that has just begun: the arena, or the defeat when the opening blow ended it."""
+    if not player_stands:
+        return await end_battle(request, session, player_won=False)
     save_session(request, session)
     return RedirectResponse("/battle", status_code=303)
 
@@ -402,11 +422,8 @@ async def start_boss_battle(request: Request, session=Depends(require_character)
     if campaign_rules.missing_requirements(bosses[boss_id], session.defeated_bosses):
         return RedirectResponse("/game", status_code=303)
 
-    if not begin_boss_battle(session, boss_id):
-        return await end_battle(request, session, player_won=False)
-
-    save_session(request, session)
-    return RedirectResponse("/battle", status_code=303)
+    session.return_to_3d = False
+    return await opened(request, session, begin_boss_battle(session, boss_id))
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +672,9 @@ async def flee(request: Request, session=Depends(require_battle)):
         battle.player_effects = []
         battle.monster.effects = []
         char.active_effects = []
+        if session.return_to_3d:
+            save_session(request, session)
+            return RedirectResponse("/", status_code=303)
         session.set_flash("game_message", {
             "text": f"You slip away from {battle.monster.name}! "
                     f"(Rolled {result['total']} vs DC {result['dc']})",
@@ -790,6 +810,7 @@ async def victory_screen(request: Request, session=Depends(require_character)):
         "rewards": rewards,
         "monster_name": session.battle.monster_name,
         "stage": stage_context(session) if session.battle.monster.name else None,
+        "back_url": "/" if session.return_to_3d else "/game",
     })
 
 
@@ -838,9 +859,10 @@ async def revive(request: Request, session=Depends(require_character)):
                 if area["id"] == starting_id:
                     session.current_area = area
                     break
+    world.roll_contents(session)
 
     save_session(request, session)
-    return RedirectResponse("/game?revived=true", status_code=303)
+    return RedirectResponse("/" if session.return_to_3d else "/game?revived=true", status_code=303)
 
 
 @router.get("/status")

@@ -41,6 +41,13 @@ export interface Gate {
   width: number;
   spawn: Vec2;
 }
+/** Where what an area holds stands: the monster, the event object, the search spot and the boss. */
+export interface ContentSlots {
+  monster: Vec2;
+  event: Vec2;
+  search: Vec2;
+  boss: Vec2 | null; // non-null exactly when the DressSpec has boss: true
+}
 export interface AreaLayout {
   type: LocationType;
   floor: { halfX: number; halfZ: number }; // the floor is the rectangle |x| <= halfX, |z| <= halfZ
@@ -49,6 +56,7 @@ export interface AreaLayout {
   props: Prop[]; // solid props
   gates: Gate[]; // one per exit, in the order of AreaSpec.exits
   spawn: Vec2; // default spawn
+  slots: ContentSlots | null; // null from buildLayout; the dressing chooses them (dressArea(...).layout)
 }
 
 /** Unit vector pointing from a side's edge into the floor. */
@@ -336,7 +344,7 @@ export function buildLayout(area: AreaSpec): AreaLayout {
       prop('rock'));
   }
 
-  return { type, floor: { halfX, halfZ }, ceiling, walls, props, gates, spawn };
+  return { type, floor: { halfX, halfZ }, ceiling, walls, props, gates, spawn, slots: null };
 }
 
 /** Yaw whose forward vector (-sin yaw, -cos yaw) points along (dx, dz). */
