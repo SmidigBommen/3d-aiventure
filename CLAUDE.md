@@ -75,11 +75,13 @@ client/public/                   files served as they are (models, favicon)
 web/app.py                       FastAPI app: API, classic routes, and client/dist mounted at /
 web/api/                         JSON API routers (added by work items)
 web/fight.py, web/world.py       the fight and the world as functions of a session, shared by both interfaces
+web/events.py                    exploration events as functions of a session, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
 holdout/                         not in the repository; the factory puts hidden acceptance tests here when it runs them
 execution/smoke.mjs              browser smoke test
+execution/smoke_server.py        the server as the smoke test starts it: d20 rolls can be set from a file
 tools/                           balance simulator, sprite drawing, classic screenshot tour, model manifest
 ```
 
@@ -128,18 +130,26 @@ tools/                           balance simulator, sprite drawing, classic scre
 - `window.__aiv`: `ready`, `frames`, `screen`, `state`, `player`, `layout` (the dressing's
   layout, with `slots`), `menuOpen`, `loading`, `modelErrors`, `dressing`, `triangles` (drawn in
   the last frame), `contents`, `interaction`, `prompt`, `battle` (null, or `{view, playing, locked,
-  result}` during a fight, when `screen` is `'battle'` and `player` is the battle stance), and the
-  actions `lookAt(x, z)` and `interact()` (what the E key runs). A fight has no actions here: the
-  smoke test presses the real keys.
+  result}` during a fight, when `screen` is `'battle'` and `player` is the battle stance), `event`
+  (null, or `{view, result}` while the event panel is open and `screen` is `'event'`), `intro` (null,
+  or the boss id while the boss introduction is open and `screen` is `'intro'`), and the
+  actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
+  boss introduction). A fight, an event and an introduction have no actions here: the smoke test
+  presses the real keys.
 - The smoke test visits all eight locations with `--serve` (it marks every boss defeated in its
   own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1. With `--serve` it also
-  plants monsters and an event in its session file (`plant`), fights in the world (a win, an
-  ability and an item, a flight, a defeat with Rise Again, a reload in the middle of a fight), meets
-  the event, and searches; in both modes it walks up to the first boss without starting the fight.
-  `walkTo(slot, range)` finds a way around what stands on the floor.
+  plants monsters and events in its session file (`plant`), fights in the world (a win, an
+  ability and an item, a flight, a defeat with Rise Again, a reload in the middle of a fight), plays
+  events in the event panel (a success, a failure, a reload, one that ends in a fight, a discovery at
+  its landmark), searches, and fights the first boss from the introduction to the defeat scene; in
+  both modes it walks up to the first boss. `walkTo(slot, range)` finds a way around what stands on
+  the floor.
+- With `--serve` the smoke test starts the server through `execution/smoke_server.py`, which wraps
+  `Dice.roll_d20`: while `$AIVENTURE_DATA/d20.txt` holds numbers, a d20 roll takes the first one and
+  removes it. Nothing under `web/`, `engine/` or `client/` reads a test setting.
 - Shop, inventory and travel still happen on the classic pages, reached from the menu (M or Esc);
-  the classic navigation links back with "3D world". Battles are met and fought in the world
-  ("Fighting in the world" below); events are met in the world and played on the classic pages.
+  the classic navigation links back with "3D world". Battles, events and bosses are met and played
+  in the world ("Fighting in the world" and "Events and bosses in the world" below).
 
 ### What an area holds
 
@@ -147,8 +157,9 @@ tools/                           balance simulator, sprite drawing, classic scre
   class, weapon drawn by `pick_monster` in `web/fight.py`, nothing built), an event id, or
   nothing, with the odds of classic Explore. It is the first use of `random` in a request and the
   only place this roll exists. `world.roll_contents(session)` stores it.
-- **Session**: `area_contents` (`{"location", "area_id", "seq", "monster", "event"}`, at most one of
-  monster and event, `seq` up by one per roll), `return_to_3d` and `engaged_monster` (the contents
+- **Session**: `area_contents` (`{"location", "area_id", "seq", "monster", "event", "spent"}`, at most one of
+  monster and event, `seq` up by one per roll, `spent` the `{"id"}` of the event resolved here since the
+  roll: `world.mark_spent`), `return_to_3d` and `engaged_monster` (the contents
   dict of the monster being fought when it was met through engage, else null; a successful flee puts
   it back into the contents, the end of a fight clears it). Contents that name another area
   count as not rolled (`world.stored_contents`). They are rolled by `move_to_area`, classic travel,
@@ -157,16 +168,20 @@ tools/                           balance simulator, sprite drawing, classic scre
   (`world.area_boss`), never stored.
 - **API** (`web/api/world.py`): `POST /api/enter`, `POST /api/search` (refused `occupied` while a
   monster or event is there, `nothing_to_find` without a search spot: `world.has_search_spot`) and
-  `POST /api/engage` with `{"id"}`, which answers `{"url", "state", "battle"}`: `/battle` and the
-  battle view for a monster (`begin_monster_battle`) or boss, `/game/event` and null for an event.
-  The world state carries `contents`
-  (`seq`, `monster`, `event` with `object` and `label` from `json/event_objects.json`, `boss`,
-  `search_spot`). `GET /api/state` never rolls.
+  `POST /api/engage` with `{"id"}`, which answers `{"url", "state", "battle", "event"}`: `/battle` and the
+  battle view for a monster (`begin_monster_battle`) or boss, `/game/event` and the event view for an
+  event. The world state carries `contents`
+  (`seq`, `monster`, `event` with `object` and `label` from `json/event_objects.json` and `landmark`,
+  `spent` in the same shape, `boss` with `title` and `intro`, `search_spot`). `spent` is neither
+  engageable nor a reason to refuse a search. `GET /api/state` never rolls.
 - **Classic Explore** makes the same roll, stores it and meets it at once. `return_to_3d` is set by
   engage and cleared by classic Explore and `POST /battle/boss`; while set, a successful flee, the
   event's Continue, revive and the victory page's `#back-link` lead to `/`.
 - **Slots**: `dressArea(...).layout.slots` (`ContentSlots` in `layout.ts`; null from `buildLayout`)
-  gives the place of the monster, the event object, the search spot and the boss. `chooseSlots` in
+  gives the place of the monster, the event object, the search spot and the boss, and `landmark`:
+  where one stands at the special landmark (non-null exactly when the dressing placed one;
+  `landmarkPoint` in `dressing.ts`: free, within 2 m of the landmark, reachable, 2 m off trigger zones,
+  1.5 m off spawn points, measured in `landmark.test.ts`). `chooseSlots` in
   `dressing.ts` picks them last: 5 m from spawn points and gates, 1.5 m inside the edge, 1 m clear
   of solids, 4 m apart, reachable (its own flood fill), the monster, event and boss off the straight
   lines to the gates. The arena is built around the boss's place (`bossSpot`), which later props
@@ -180,10 +195,53 @@ tools/                           balance simulator, sprite drawing, classic scre
   `loadFigures` (a copy of the file's scene, skinned, playing its idle clip), name plates as
   sprites, the glow of an event object. `main.ts` rebuilds it when the contents change, walks in the
   dressed layout plus `contentSolids`, shows `#prompt` and `#notice`, and runs E.
-- **Way back** (events): before `POST /api/engage` the client saves `{location, area, x, z, yaw}`
-  under `sessionStorage['aiv.return']`; for an event it goes to the answered `url`. When `/` loads
-  with a matching entry and nothing pending it posts `/api/enter`, skips the title screen and puts
-  the player there. Continue on the title screen posts `/api/enter` too. A fight stays on `/`.
+- **Where the player stood**: before `POST /api/engage` the client saves `{location, area, x, z, yaw}`
+  under `sessionStorage['aiv.return']`. An event keeps it until its panel closes, so a reload puts
+  the player back in front of it; a fight drops it. When `/` loads with a matching entry and nothing
+  pending it posts `/api/enter`, skips the title screen and puts the player there. Continue on the
+  title screen posts `/api/enter` too. Nothing met in the world leaves `/`.
+
+### Events and bosses in the world
+
+- **`web/events.py`** is an event as functions of a `GameSession`: `event_view` (the pending event,
+  each choice with `skill`, `dc`, `modifier`, `proficient`, `hotkey`), `choose` (resolves, grants XP,
+  stores `event_result` with the `event_id`, spends a `once` event, `world.mark_spent`), `dismiss`
+  and `carry_on` (clears the result; `"fight"` or `"defeat"` when the outcome started a fight under
+  the conditions of `GET /battle/start`, else `"world"`), `result_view` and `location_tier`. It raises
+  `fight.Rejected` (`no_event`, `no_such_choice`, `nothing_to_continue`) before anything changed. The
+  classic routes in `web/routes/game.py` call the same functions; classic Continue still leads to
+  `GET /battle/start`, which starts the fight.
+- **API** (`web/api/event.py`, under `/api/event`): `GET` (`{"event", "result", "state"}`, writes
+  nothing), `POST choose` (`{"choice"}`) and `POST continue` (adds `battle`: the view when a fight
+  began, else null). Bodies go through `read_object` of `web/api/battle.py`; a refusal leaves the
+  session file untouched.
+- **Discoveries**: an event with `special` is marked `landmark: true`. It has no object on the event
+  slot: the special landmark of the area glows and carries the name plate, and the prompt shows within
+  3 m of `slots.landmark` (`eventPlace` in `contents.ts`).
+- **What is left**: `contents.spent` is drawn by `remainsOf(object)`: `'stays'` objects without glow,
+  light and plate (a chest opened, the rest darkened) and still blocking, `'gone'` ones not at all.
+- **Where a fight stands**: the session key `battle_place` (`monster`, `event`, `landmark`, `boss`;
+  missing or unknown counts as `monster`) is set by `fight.begin_battle(..., place)` and answered as
+  `battle.monster.place`; `fightSlot(slots, place)` in `contents.ts` gives the point. `boss`: engage
+  with a boss id and classic `POST /battle/boss`. `event` / `landmark`: `POST /api/event/continue`.
+  `monster`: everything else.
+- **Boss keys of the battle view**: `monster.taunt` (boss in a fight only: its last line in the
+  stored log, else the first of `taunts.start`; no dice) and `monster.enrage_text`.
+- **`client/src/world/event.ts`** (pure) has the types and the lines of the panel (`choiceForKey`,
+  `choiceLine`, `rollLine`, `verdict`, `outcomeChips`); **`client/src/battle/boss.ts`** (pure) has
+  `bossLook(id, enraged)`, `ENRAGE_LOOK`, `enrageCue(events, timeline)` and `victoryLines(boss)`.
+- **`client/src/world/eventPanel.ts`** fills `#event-panel` and `#boss-intro`. `main.ts` holds both
+  (`openEvent`, `chooseEvent`, `proceedEvent`, `openIntro`, `fightBoss`): keys 1-4 choose, Enter,
+  Space or E continue; E at a boss opens the introduction and sends nothing until Fight (Enter,
+  Space, E), Esc steps back. While either is open nobody walks and M and Esc open no menu. When `/`
+  loads with an event pending, the area is entered and the panel opened from `GET /api/event`.
+- **Boss fight on screen**: `#battle-monster` gets the classes `boss` and `enraged`, the title and
+  `#battle-taunt`; at the banner cue of an `enrage` event `#battle-enrage` shows the line for 2.5 s and
+  `battleScene.setEnraged` gives the model its rage look; the result panel shows `victoryLines` as
+  `.boss-line[data-kind]` (the defeat text before the rewards, the rest after).
+- **Lady Vex's ambush is fought in the classic interface.** Only classic `POST /game/travel` starts
+  it; the route sets `return_to_3d = False` and place `monster`, so victory, defeat and revive lead to
+  classic pages. Opening `/` during it shows it like any pending fight, on the monster slot.
 
 ### Fighting in the world
 
@@ -221,14 +279,14 @@ tools/                           balance simulator, sprite drawing, classic scre
   `MODELS.md`), `creatureMotion(model, slot)` (the clip, or the fallback motion `lunge`, `shake`,
   `sink`) and `battleStance(from, slot, layout)`: 2.5 m in front of the monster on the side the
   player came from, or the nearest free point 1.5 to 2.5 m from it.
-- **`client/src/battle/battleScene.ts`** draws the fight: the monster on its slot (the boss slot
-  for the area's boss) with its clips, particles per effect key, what flies for a ranged hit, and
+- **`client/src/battle/battleScene.ts`** draws the fight: the monster where the view's `place`
+  puts it (`fightSlot`) with its clips, particles per effect key, what flies for a ranged hit, and
   the offsets of the player's eye (lunge, rise, shake, sidestep, fall). `battle/panel.ts` fills
   `#battle-panel` (`#battle-monster`, `#battle-player`, `#battle-actions`, `#battle-log`,
   `#battle-banner`, `#battle-result`), the floating texts and the flash of an effect on the player.
   Both run cues and show the view; neither decides anything.
 - **`main.ts`** holds the fight (`startBattle`, `present`, `act`, `proceed`, `riseAgain`): after
-  an engage answer with a battle the client stays on `/`, the view glides to the stance in 0.4 s,
+  an engage answer (or an event's Continue) with a battle the client stays on `/`, the view glides to the stance in 0.4 s,
   and M, Esc, E and the movement keys do nothing. A turn whose `seq` differs from
   `sessionStorage['aiv.turn']` and has events is played once; otherwise the result is shown at once.
   Buttons and hotkeys are locked from sending an action until `inputAt`. Victory shows the rewards

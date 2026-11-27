@@ -3,6 +3,7 @@
 
 import { flashPlace, type FxLook } from './fx';
 import type { FloatStyle, Side } from './timeline';
+import { ENRAGE_BANNER_SECONDS, victoryLines, type VictoryLine } from './boss';
 import type { BattleAction, BattleEffect, BattleView } from './view';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -54,6 +55,7 @@ export function showBattlePanel(on: boolean): void {
     el('battle-result').hidden = true;
     el('battle-floats').replaceChildren();
     showBanner(null);
+    showEnrage(null);
   }
 }
 
@@ -65,16 +67,23 @@ export function renderBattle(view: BattleView, locked: boolean, hp: { player: nu
   const { monster, player } = view;
   const monsterHp = bar('hp', hp ? hp.monster : monster.hp, monster.max_hp);
   bars.monster = monsterHp.bar;
-  el('battle-monster').replaceChildren(
+  const plate = el('battle-monster');
+  plate.classList.toggle('boss', monster.is_boss);
+  plate.classList.toggle('enraged', monster.enraged);
+  const taunt = monster.taunt ? h('p', '', `\u201c${monster.taunt}\u201d`) : null;
+  if (taunt) taunt.id = 'battle-taunt';
+  plate.replaceChildren(...[
     h('div', 'plate-head', '', [
       h('span', 'plate-name', monster.name),
       monster.is_boss ? h('span', 'tag tag-boss', 'Boss') : null,
       monster.enraged ? h('span', 'tag tag-enraged', 'Enraged') : null,
       h('span', 'plate-level', `Level ${monster.level}`),
     ]),
+    monster.is_boss && monster.title ? h('div', 'plate-title', monster.title) : null,
     monsterHp.node,
-    ...[badges(monster.effects)].filter((node): node is HTMLElement => node !== null),
-  );
+    badges(monster.effects),
+    taunt,
+  ].filter((node): node is HTMLElement => node !== null));
 
   const playerHp = bar('hp', hp ? hp.player : player.hp, player.max_hp);
   bars.player = playerHp.bar;
@@ -133,6 +142,17 @@ export function showBanner(text: string | null): void {
   banner.hidden = !text;
 }
 
+let enrageTimer: number | undefined;
+
+/** The line of a boss's rage, across the view for ENRAGE_BANNER_SECONDS; `null` takes it away. */
+export function showEnrage(text: string | null): void {
+  const banner = el('battle-enrage');
+  window.clearTimeout(enrageTimer);
+  banner.textContent = text ?? '';
+  banner.hidden = !text;
+  if (text) enrageTimer = window.setTimeout(() => { banner.hidden = true; }, ENRAGE_BANNER_SECONDS * 1000);
+}
+
 /** A number or word rising from a side: above the monster (at `at`, in pixels) or above the player's plate. */
 export function floatText(side: Side, text: string, style: FloatStyle, at: { x: number; y: number } | null): void {
   const layer = el('battle-floats');
@@ -170,7 +190,17 @@ export function showResult(view: BattleView): void {
   const row = (label: string, value: string, cls = ''): HTMLElement => h('div', `reward-row ${cls}`, '', [h('span', 'label', label), h('span', 'value', value)]);
   if (view.phase === 'victory') {
     const rewards = view.rewards;
-    const boss = rewards?.boss ?? null;
+    const lines = rewards?.boss ? victoryLines(rewards.boss) : [];
+    const line = (made: VictoryLine): HTMLElement => {
+      const node = h('p', 'boss-line', made.text);
+      node.dataset.kind = made.kind;
+      if (made.kind === 'complete') {
+        const ending = h('a', '', 'The ending') as HTMLAnchorElement;
+        ending.href = '/game/ending';
+        node.append(' ', ending);
+      }
+      return node;
+    };
     const proceed = h('button', 'btn', 'Continue') as HTMLButtonElement;
     proceed.type = 'button';
     proceed.id = 'battle-continue';
@@ -178,11 +208,8 @@ export function showResult(view: BattleView): void {
     panel.replaceChildren(
       h('h2', '', 'Victory'),
       h('p', 'result-line', `You have defeated ${view.monster.name}!`),
-      ...(boss ? [h('div', 'boss-block', '', [
-        boss.defeat_text ? h('p', 'boss-text', boss.defeat_text) : null,
-        boss.shard ? h('p', 'boss-shard', `${boss.shard} recovered · Crown shards: ${boss.shards_collected} / ${boss.shards_total}`) : null,
-        boss.act_unlocked ? h('p', 'boss-act', `New lands open: Act ${boss.act_unlocked.number}: ${boss.act_unlocked.title}`) : null,
-      ])] : []),
+      // The defeat scene of a boss: its last moment first, then what was won, then what that opens.
+      ...lines.filter((made) => made.kind === 'defeat').map(line),
       ...(rewards ? [h('div', 'rewards', '', [
         row('Experience:', `+${rewards.xp} XP`, 'reward-xp'),
         row('Gold:', `+${rewards.gold} gold`, 'reward-gold'),
@@ -197,6 +224,7 @@ export function showResult(view: BattleView): void {
         rewards.new_abilities.length ? h('p', '', `New abilities: ${rewards.new_abilities.join(', ')}`) : null,
         rewards.asi_points ? h('p', '', `Ability points to spend: ${rewards.asi_points}`) : null,
       ])] : []),
+      ...lines.filter((made) => made.kind !== 'defeat').map(line),
       proceed,
     );
   } else {

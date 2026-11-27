@@ -8,15 +8,11 @@ from fastapi.templating import Jinja2Templates
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from web.game_session import (
-    get_session, save_session, get_campaign, get_bosses, get_events, get_quests,
-    get_primary_modifier,
+    get_session, save_session, get_campaign, get_bosses, get_quests,
 )
 from web.dependencies import require_character
-from web import world
+from web import events, fight, world
 from engine import campaign as campaign_rules
-from engine.events import resolve_event_choice, scaled_dc
-from engine.leveling import grant_xp
-from skills import calculate_skill_modifier
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).parent.parent / "templates")
@@ -30,13 +26,8 @@ _can_rest = world.can_rest
 _danger = world.danger_band
 
 
-def location_tier(location) -> int:
-    """Danger tier of a location: the low end of its encounter level range."""
-    level_range = str(location.get("encounterLevel", "1")) if location else "1"
-    try:
-        return max(1, int(level_range.split("-")[0]))
-    except ValueError:
-        return 1
+# The events themselves live in web/events.py. This name stays importable from here.
+location_tier = events.location_tier
 
 
 def _boss_panel(session):
@@ -210,27 +201,17 @@ async def event_view(request: Request, session=Depends(require_character)):
             "result": session.event_result,
         })
 
-    event = get_events().get(session.pending_event) if session.pending_event else None
+    event = events.event_view(session)
     if not event:
         session.pending_event = None
         save_session(request, session)
         return RedirectResponse("/game", status_code=303)
 
-    tier = location_tier(session.current_location)
-    choices = []
-    for index, choice in enumerate(event["choices"]):
-        entry = {"index": index, "label": choice["label"], "skill": choice.get("skill")}
-        if choice.get("skill"):
-            entry["dc"] = scaled_dc(choice.get("dc", 10), tier)
-            entry["modifier"] = calculate_skill_modifier(session.character, choice["skill"])
-            entry["proficient"] = session.character.has_skill_proficiency(choice["skill"])
-        choices.append(entry)
-
     return templates.TemplateResponse(request, "game/event.html", {
         "request": request,
         "title": event["title"],
         "character": char_data,
-        "event": {"title": event["title"], "text": event["text"], "choices": choices},
+        "event": event,
         "result": None,
     })
 
@@ -238,30 +219,14 @@ async def event_view(request: Request, session=Depends(require_character)):
 @router.post("/event/choose")
 async def event_choose(request: Request, choice: int = Form(...), session=Depends(require_character)):
     """Resolve the player's choice for the pending event."""
-    event_id = session.pending_event
-    event = get_events().get(event_id) if event_id else None
-    if not event:
-        session.pending_event = None
-        save_session(request, session)
-        return RedirectResponse("/game", status_code=303)
-
-    char = session.character
-    result = resolve_event_choice(char, event, choice, location_tier(session.current_location))
-    if result is None:
+    try:
+        events.choose(session, choice)
+    except fight.Rejected as rejection:
+        if rejection.code == "no_event":
+            session.pending_event = None
+            save_session(request, session)
+            return RedirectResponse("/game", status_code=303)
         return RedirectResponse("/game/event", status_code=303)
-
-    if result["xp"]:
-        xp_result = grant_xp(char, result["xp"], get_primary_modifier(char))
-        result["leveled_up"] = xp_result["leveled_up"]
-        result["new_level"] = xp_result["new_level"]
-
-    result["title"] = event["title"]
-    session.pending_event = None
-    session.event_result = result
-    session.events_resolved += 1
-    # One-time events are spent whatever the outcome (no retrying a botched check)
-    if event.get("once") and event_id not in session.completed_events:
-        session.completed_events.append(event_id)
 
     save_session(request, session)
     return RedirectResponse("/game/event", status_code=303)
@@ -270,8 +235,7 @@ async def event_choose(request: Request, choice: int = Form(...), session=Depend
 @router.post("/event/continue")
 async def event_continue(request: Request, session=Depends(require_character)):
     """Dismiss the event outcome. Some outcomes lead straight into a fight."""
-    result = session.event_result
-    session.event_result = None
+    result = events.dismiss(session)
     save_session(request, session)
     if result and result.get("battle"):
         return RedirectResponse("/battle/start", status_code=303)
@@ -363,7 +327,9 @@ async def travel_to_location(request: Request, location_name: str = Form(...), s
             ambush = campaign_rules.pending_ambush(get_bosses(), act, session.defeated_bosses)
             if ambush and session.character.current_hit_points > 0:
                 from web.routes.battle import begin_boss_battle, end_battle
-                if not begin_boss_battle(session, ambush):
+                # The ambush is fought on the classic pages, on the road rather than at a boss's place
+                session.return_to_3d = False
+                if not begin_boss_battle(session, ambush, place="monster"):
                     return await end_battle(request, session, player_won=False)
                 save_session(request, session)
                 return RedirectResponse("/battle", status_code=303)

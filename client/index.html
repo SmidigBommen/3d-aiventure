@@ -32,6 +32,7 @@
     <div id="battle-flash"></div>
     <div id="battle-monster" class="battle-plate"></div>
     <div id="battle-banner" hidden></div>
+    <div id="battle-enrage" hidden></div>
     <div id="battle-floats"></div>
     <div class="battle-bottom">
       <div id="battle-player" class="battle-plate"></div>
@@ -50,6 +51,29 @@
       <button class="btn" id="btn-continue" type="button" hidden>Continue</button>
       <a class="btn" id="pending-link" href="/classic" hidden></a>
       <a class="btn" id="classic-link" href="/classic" hidden>Classic interface</a>
+    </div>
+
+    <div id="event-panel" class="panel" hidden>
+      <h2 id="event-title"></h2>
+      <p id="event-text"></p>
+      <div id="event-choices"></div>
+      <div id="event-result" hidden>
+        <p id="event-roll"></p>
+        <p id="event-verdict"></p>
+        <p id="event-outcome"></p>
+        <div id="event-chips"></div>
+        <button class="btn" id="event-continue" type="button">Continue</button>
+      </div>
+    </div>
+
+    <div id="boss-intro" class="panel" hidden>
+      <h2 id="boss-intro-name"></h2>
+      <p id="boss-intro-title"></p>
+      <p id="boss-intro-text"></p>
+      <div class="result-buttons">
+        <button class="btn" id="boss-intro-fight" type="button">Fight</button>
+        <button class="btn btn-quiet" id="boss-intro-back" type="button">Step back</button>
+      </div>
     </div>
 
     <div id="menu" class="panel" hidden>

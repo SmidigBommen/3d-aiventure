@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import {
-  fetchBattle, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postMove, postSearch, type WorldState,
+  fetchBattle, fetchEvent, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose, postEventContinue,
+  postMove, postSearch, type WorldState,
 } from './api';
-import { buildBattleScene, type BattleScene } from './battle/battleScene';
+import { buildBattleScene, type BattleScene, type Rage } from './battle/battleScene';
+import { bossLook, enrageCue } from './battle/boss';
 import { fxLook } from './battle/fx';
-import { bindBattlePanel, flash, floatText, renderBattle, setHp, showBanner, showBattlePanel, showResult } from './battle/panel';
+import { bindBattlePanel, flash, floatText, renderBattle, setHp, showBanner, showBattlePanel, showEnrage, showResult } from './battle/panel';
 import { buildTimeline, type Cue, type Finale, type Timeline } from './battle/timeline';
 import { actionForKey, type BattleAction, type BattleView } from './battle/view';
 import type { Vec2 } from './input/movement';
@@ -12,14 +14,24 @@ import { buildTitleScene } from './titleScene';
 import { hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showTitle, veil } from './ui';
 import { buildAreaScene, type AreaScene } from './world/areaScene';
 import { isFree } from './world/collision';
-import { bossScale, buildContentScene, contentModels, type ContentScene } from './world/contentScene';
-import { battleStance, contentSolids, creatureLook, interactionAt, type AreaContents, type Interaction } from './world/contents';
-import { dressArea, dressSpecOf, type Dressing } from './world/dressing';
+import { buildContentScene, contentModels, underCeiling, type ContentScene } from './world/contentScene';
+import {
+  battleStance, contentSolids, creatureLook, eventPlace, fightSlot, interactionAt, type AreaContents, type BossContent, type Interaction,
+} from './world/contents';
+import { dressArea, dressSpecOf, type Dressing, type Placement } from './world/dressing';
+import { choiceForKey, type EventResult, type EventView } from './world/event';
+import { bindBossIntro, bindEventPanel, renderEvent, renderEventResult, showBossIntro, showEventPanel } from './world/eventPanel';
 import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from './world/layout';
 import { loadFigures, loadModels, modelErrors, type Figure } from './world/modelLoader';
 import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
-type Screen = 'title' | 'world' | 'pending' | 'battle';
+type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro';
+
+/** An event in the world: its choices while it waits for one (`view`), then its outcome (`result`). */
+interface Happening {
+  view: EventView | null;
+  result: EventResult | null;
+}
 
 /** A fight in the world: the view the server last answered and where its playback stands. */
 interface Fight {
@@ -36,7 +48,8 @@ interface Fight {
 // and with what the contents block. `contents` is what the server says the area holds,
 // `interaction` what the player can turn to from where they stand, `prompt` the line shown for it.
 // During a fight `screen` is 'battle', `battle` is the fight, `player` is the battle stance and
-// there is no interaction or prompt.
+// there is no interaction or prompt. While the event panel is open `screen` is 'event' and `event`
+// holds what it shows; while a boss is introduced `screen` is 'intro' and `intro` is the boss's id.
 declare global {
   interface Window {
     __aiv: {
@@ -55,6 +68,8 @@ declare global {
       readonly interaction: Interaction | null;
       readonly prompt: string | null;
       readonly battle: Fight | null;
+      readonly event: Happening | null;
+      readonly intro: string | null;
       lookAt: (x: number, z: number) => void;
       interact: () => void;
     };
@@ -96,9 +111,16 @@ let stancePitch = 0;
 let glide: { x: number; z: number; yaw: number; pitch: number; t: number } | null = null;
 let duel: BattleScene | null = null; // the monster being fought, drawn
 let duelBoss = false; // it is the boss of the area: the battle scene draws it, the contents do not
-let playback: { timeline: Timeline; t: number; next: number } | null = null;
+let duelOnEvent = false; // it stands where the event object stood: what is left of that is hidden meanwhile
+let duelRage: Rage | null = null; // how this boss looks in its rage
+let playback: { timeline: Timeline; t: number; next: number; enrageAt: number | null } | null = null;
+
+let happening: Happening | null = null; // the event the panel shows
+let introBoss: string | null = null; // the boss the introduction panel shows
 
 const inWorld = (): boolean => screen === 'world' && layout !== null;
+// A panel is open over the area: the player stands where they stood and nothing walks.
+const inPanel = (): boolean => (screen === 'event' || screen === 'intro') && layout !== null;
 const inFight = (): boolean => screen === 'battle' && layout !== null;
 const turn = (dYaw: number, dPitch: number): void => {
   view = turnView(view, dYaw, dPitch);
@@ -106,7 +128,8 @@ const turn = (dYaw: number, dPitch: number): void => {
 
 // What the page reports of the area: nothing while one is loading, also on the way from gate to gate,
 // when the area left behind is still under the veil.
-const shown = (): boolean => (inWorld() || inFight()) && !loading;
+const shown = (): boolean => (inWorld() || inFight() || inPanel()) && !loading;
+const landmarkOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'special') ?? null;
 const contentsOf = (s: WorldState | null): AreaContents | null => s?.contents ?? null;
 const interactionNow = (): Interaction | null => (inWorld() && !loading && layout ? interactionAt(player, layout, contentsOf(state)) : null);
 const promptNow = (): string | null => (menuOpen || busy || crossing ? null : (interactionNow()?.prompt ?? null));
@@ -130,6 +153,8 @@ window.__aiv = {
   get interaction() { return interactionNow(); },
   get prompt() { return promptNow(); },
   get battle() { return fight; },
+  get event() { return screen === 'event' ? happening : null; },
+  get intro() { return screen === 'intro' ? introBoss : null; },
   lookAt(x, z) {
     if (!inWorld() || loading) return;
     const t = turnTowards(view, player, { x, z });
@@ -151,6 +176,10 @@ function leaveWorld(): void {
   entry += 1;
   setLoading(false);
   closeBattle();
+  happening = null;
+  introBoss = null;
+  showEventPanel(false);
+  showBossIntro(null);
   things?.dispose();
   things = null;
   area?.dispose();
@@ -166,6 +195,21 @@ function leaveWorld(): void {
   if (document.pointerLockElement === canvas) document.exitPointerLock();
 }
 
+/**
+ * The contents as they are drawn right now. The boss that is being fought is drawn by the battle scene, and a
+ * monster that came out of an event stands in place of what the event left. The event whose panel is open has
+ * left the server's contents already (it is pending); its object stays in view until the choice is made.
+ */
+function drawn(contents: AreaContents | null): AreaContents | null {
+  if (!contents) return null;
+  let seen = contents;
+  if (duelBoss) seen = { ...seen, boss: null };
+  if (duelOnEvent) seen = { ...seen, spent: null };
+  const open = screen === 'event' ? (happening?.view ?? null) : null;
+  if (open && !seen.event) seen = { ...seen, event: { id: open.id, title: open.title, object: open.object, label: open.label, landmark: open.landmark } };
+  return seen;
+}
+
 /** Puts what the area holds on its slots, in place of what stood there, and lets it block the way. */
 function placeContents(contents: AreaContents | null, figures: Map<string, Figure | null>): void {
   if (!layout || !area) return;
@@ -173,8 +217,7 @@ function placeContents(contents: AreaContents | null, figures: Map<string, Figur
     area.scene.remove(things.group);
     things.dispose();
   }
-  // The boss that is being fought is drawn by the battle scene.
-  things = buildContentScene(layout, contents && duelBoss ? { ...contents, boss: null } : contents, figures);
+  things = buildContentScene(layout, drawn(contents), figures, landmarkOf(dressing));
   area.scene.add(things.group);
   const solids = layout.slots ? contentSolids(layout.slots, contents) : [];
   walkLayout = { ...layout, props: [...layout.props, ...solids.map((box) => ({ ...box, kind: 'model' as const }))] };
@@ -186,7 +229,7 @@ async function showContents(next: WorldState): Promise<void> {
   const mine = entry;
   state = next;
   showHud(next, false);
-  const figures = await loadFigures(contentModels(layout, contentsOf(next)));
+  const figures = await loadFigures(contentModels(layout, drawn(contentsOf(next)), landmarkOf(dressing)));
   if (mine !== entry || state !== next) return;
   placeContents(contentsOf(next), figures);
 }
@@ -206,7 +249,7 @@ async function enterArea(next: WorldState, cameFrom: string | null, at: { x: num
   // A model that fails to load comes back as null and is drawn as a box.
   const [models, figures] = await Promise.all([
     loadModels(dressed.placements.map((p) => p.model)),
-    loadFigures(contentModels(dressed.layout, contentsOf(next))),
+    loadFigures(contentModels(dressed.layout, contentsOf(next), landmarkOf(dressed))),
   ]);
   if (mine !== entry) return;
   things?.dispose();
@@ -275,7 +318,8 @@ const fontReady = (): Promise<unknown> => Promise.race([cinzel, new Promise((don
  * back from an encounter started here is put where they stood, without the title screen.
  */
 async function refresh(): Promise<void> {
-  const wasWalking = screen === 'world';
+  // A panel over the area (an event, a boss's introduction) is still a player standing in it.
+  const wasWalking = screen === 'world' || screen === 'event' || screen === 'intro';
   busy = false;
   const sameArea = (next: WorldState): boolean =>
     wasWalking && next.area?.id === state?.area?.id && next.location?.name === state?.location?.name && !next.pending;
@@ -286,6 +330,23 @@ async function refresh(): Promise<void> {
     const matches = saved !== null && saved.location === next.location?.name && saved.area === next.area?.id;
     // Kept only while the encounter it belongs to is still going on.
     if (!(matches && next.pending)) forgetReturn();
+    // An event that waits for a choice, or for its outcome to be read, goes on here, without the title screen.
+    if (next.pending?.kind === 'event') {
+      const now = await fetchEvent();
+      if (now.ok && (now.event || now.result) && now.state.location && now.state.area) {
+        const here = layout !== null && (screen === 'world' || screen === 'event' || screen === 'intro')
+          && now.state.area.id === state?.area?.id && now.state.location.name === state?.location?.name;
+        if (!here) {
+          hideTitle();
+          await fontReady();
+          await enterArea(now.state, null, matches ? saved : null);
+        }
+        if (layout && now.state.area.id === state?.area?.id) openEvent(now.event, now.result, now.state);
+        return;
+      }
+    }
+    // The event the panel shows is over (resolved elsewhere): the panel goes.
+    if (screen === 'event') closeEvent();
     // A fight (or the defeat that ended one) goes on here, without the title screen.
     if (next.pending?.kind === 'battle' || next.pending?.kind === 'defeat') {
       const now = await fetchBattle();
@@ -348,13 +409,21 @@ async function engage(id: string): Promise<void> {
   try {
     sessionStorage.setItem(RETURN_KEY, JSON.stringify(point));
   } catch {
-    /* no storage: the way back starts at the title screen */
+    /* no storage: a reload puts the player at the default spawn */
   }
   const answer = await postEngage(id);
   if (answer.ok && answer.battle) {
-    // A fight is fought here; the saved place is for encounters that go on elsewhere.
+    // A fight is fought here; the saved place is for an event, which a reload has to find again.
     forgetReturn();
     await startBattle(answer.battle, answer.state);
+    return;
+  }
+  if (answer.ok && answer.event) {
+    if (layout?.slots) {
+      const t = turnTowards(view, player, eventPlace(layout.slots, answer.event));
+      turn(t.dYaw, t.dPitch);
+    }
+    openEvent(answer.event, null, answer.state);
     return;
   }
   if (answer.ok) {
@@ -390,6 +459,8 @@ function closeBattle(): void {
   playback = null;
   glide = null;
   duelBoss = false;
+  duelOnEvent = false;
+  duelRage = null;
   if (duel) {
     area?.scene.remove(duel.group);
     duel.dispose();
@@ -400,20 +471,21 @@ function closeBattle(): void {
 
 /**
  * Opens the fight `battle` in the area that stands: the player is held at the battle stance in front
- * of the monster (on the boss slot when it is the area's boss), and the turn in the view is shown.
+ * of the monster, which stands where the view's `place` says, and the turn in the view is shown.
  */
 async function startBattle(battle: BattleView, next: WorldState): Promise<void> {
   if (!layout || !layout.slots || !area) return;
   const mine = entry;
   const slots = layout.slots;
-  const onBossSlot = battle.monster.boss_id !== null && slots.boss !== null && contentsOf(next)?.boss?.id === battle.monster.boss_id;
-  const slot = onBossSlot && slots.boss ? slots.boss : slots.monster;
+  const bossId = battle.monster.boss_id;
+  const slot = fightSlot(slots, battle.monster.place);
   closeBattle();
   stance = battleStance(player, slot, walkLayout ?? layout);
   stancePitch = 0;
   glide = { x: player.x, z: player.z, yaw: view.yaw, pitch: view.pitch, t: 0 };
   fight = { view: battle, playing: false, locked: true, result: null };
-  duelBoss = onBossSlot;
+  duelBoss = bossId !== null && contentsOf(next)?.boss?.id === bossId;
+  duelOnEvent = battle.monster.place === 'event';
   screen = 'battle';
   state = next;
   busy = false;
@@ -424,11 +496,23 @@ async function startBattle(battle: BattleView, next: WorldState): Promise<void> 
   hideNotice();
   showHud(next, false);
 
-  const look = creatureLook(battle.monster.boss_id ?? battle.monster.race);
-  const [figures, fighters] = await Promise.all([loadFigures(contentModels(layout, contentsOf(next))), loadFigures([look.model])]);
+  // A boss is drawn larger than its kind, and larger again in its rage; in a dungeon it stays under the ceiling.
+  const look = bossId !== null ? bossLook(bossId, false) : creatureLook(battle.monster.race);
+  const scale = bossId !== null ? underCeiling(layout, look.model, look.scale) : look.scale;
+  if (bossId !== null) {
+    const hot = bossLook(bossId, true);
+    duelRage = { factor: underCeiling(layout, hot.model, hot.scale) / scale, emissive: hot.emissive ?? '#ff3b2f', pulse: hot.pulse, period: hot.period };
+  }
+  const [figures, fighters] = await Promise.all([
+    loadFigures(contentModels(layout, drawn(contentsOf(next)), landmarkOf(dressing))),
+    loadFigures([look.model]),
+  ]);
   if (mine !== entry || !layout || !area || fight?.view !== battle) return;
   placeContents(contentsOf(next), figures);
-  duel = buildBattleScene({ ...look, scale: onBossSlot ? bossScale(layout, look) : look.scale }, fighters.get(look.model) ?? null, slot, stance);
+  duel = buildBattleScene({ ...look, scale }, fighters.get(look.model) ?? null, slot, stance);
+  // A rage that the turn about to be played brings on shows when that turn reaches it.
+  const toPlay = battle.turn.seq !== playedTurn() && battle.turn.events.some((event) => event.kind === 'enrage');
+  duel.setEnraged(battle.monster.enraged && !toPlay ? duelRage : null);
   area.scene.add(duel.group);
   // The view is lowered to the monster, which then stands above the panel at the bottom.
   const tall = duel.head().y;
@@ -452,7 +536,7 @@ function present(battle: BattleView): void {
   fight.playing = true;
   fight.locked = true;
   renderBattle(battle, true, timeline.start);
-  playback = { timeline, t: 0, next: 0 };
+  playback = { timeline, t: 0, next: 0, enrageAt: enrageCue(battle.turn.events, timeline)?.t ?? null };
 }
 
 /** The view as it is after its turn: the buttons open again, or the result panel. `atOnce`: nothing was played. */
@@ -464,6 +548,7 @@ function settle(atOnce: boolean): void {
   fight.locked = battle.phase !== 'fight';
   showBanner(null);
   renderBattle(battle, fight.locked);
+  duel?.setEnraged(battle.monster.enraged ? duelRage : null);
   if (atOnce) duel?.settle(battle.phase === 'victory' ? 'monster' : battle.phase === 'defeat' ? 'player' : null);
   if (battle.phase === 'victory' || battle.phase === 'defeat') {
     fight.result = battle.phase;
@@ -497,6 +582,12 @@ function advancePlayback(dt: number): void {
   playback.t += dt;
   const { cues, inputAt } = playback.timeline;
   while (playback.next < cues.length && cues[playback.next].t <= playback.t) runCue(cues[playback.next++]);
+  if (playback.enrageAt !== null && playback.t >= playback.enrageAt && fight) {
+    // The boss flies into its rage: its line across the view, and its look from here on.
+    playback.enrageAt = null;
+    showEnrage(fight.view.monster.enrage_text);
+    duel?.setEnraged(duelRage);
+  }
   if (playback.t >= inputAt) settle(false);
 }
 
@@ -587,6 +678,135 @@ function battleKey(event: KeyboardEvent): void {
   if (action) void act(action);
 }
 
+// --- events and the moment before a boss -------------------------------------------------------
+
+/** Holds the player where they stand while a panel is open over the area. */
+function holdStill(): void {
+  busy = false;
+  held.clear();
+  setMenu(false);
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+  showPrompt(null);
+  hideNotice();
+}
+
+/** Opens the event panel on a pending event (`shownView`) or on the outcome of one (`result`), in the area as `next` describes it. */
+function openEvent(shownView: EventView | null, result: EventResult | null, next: WorldState): void {
+  happening = { view: result ? null : shownView, result };
+  screen = 'event';
+  holdStill();
+  if (result) renderEventResult(result, false);
+  else if (shownView) renderEvent(shownView, false);
+  showEventPanel(true);
+  void showContents(next);
+}
+
+function closeEvent(): void {
+  happening = null;
+  showEventPanel(false);
+  forgetReturn();
+  if (screen === 'event') screen = 'world';
+}
+
+/** What a choice button or digit key does: the choice goes to the server and the outcome it answers is shown. */
+async function chooseEvent(index: number): Promise<void> {
+  const open = screen === 'event' ? (happening?.view ?? null) : null;
+  if (!open || busy || !open.choices.some((choice) => choice.index === index)) return;
+  busy = true;
+  renderEvent(open, true);
+  const mine = entry;
+  const answer = await postEventChoose(index);
+  busy = false;
+  if (mine !== entry || screen !== 'event') return;
+  if (!answer.ok || !answer.result) {
+    // Refused: show what the server says is true now.
+    closeEvent();
+    await refresh();
+    return;
+  }
+  happening = { view: null, result: answer.result };
+  renderEventResult(answer.result, false);
+  await showContents(answer.state);
+}
+
+/** Continue after the outcome: on with the walk, or into the fight the outcome started. */
+async function proceedEvent(): Promise<void> {
+  const result = screen === 'event' ? (happening?.result ?? null) : null;
+  if (!result || busy) return;
+  busy = true;
+  renderEventResult(result, true);
+  const mine = entry;
+  const answer = await postEventContinue();
+  busy = false;
+  if (mine !== entry || screen !== 'event') return;
+  closeEvent();
+  if (!answer.ok) {
+    await refresh();
+    return;
+  }
+  if (answer.battle && answer.battle.phase !== 'none') {
+    await startBattle(answer.battle, answer.state);
+    return;
+  }
+  let next = answer.state;
+  if (!next.pending && !contentsOf(next)) {
+    // The event was met on the classic pages: what the area holds is rolled on arriving here.
+    const arrived = await postEnter();
+    if (mine !== entry) return;
+    if (arrived.ok) next = arrived.state;
+  }
+  await showContents(next);
+}
+
+function eventKey(event: KeyboardEvent): void {
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+  // The keys that walk, interact or scroll do none of that while the panel is open.
+  if (moveKey(event.code) || event.code === 'KeyE' || event.code === 'Space') event.preventDefault();
+  if (event.repeat || !happening) return;
+  if (happening.result) {
+    if (['Enter', 'NumpadEnter', 'Space', 'KeyE'].includes(event.code)) void proceedEvent();
+    return;
+  }
+  const choice = happening.view ? choiceForKey(happening.view, event.code) : null;
+  if (choice !== null) void chooseEvent(choice);
+}
+
+/** Opens the introduction of a boss: the player turns to it (it turns to the player by itself) and nothing is sent yet. */
+function openIntro(boss: BossContent, at: Vec2): void {
+  introBoss = boss.id;
+  screen = 'intro';
+  holdStill();
+  const t = turnTowards(view, player, at);
+  turn(t.dYaw, t.dPitch);
+  showBossIntro(boss);
+}
+
+/** Step back: the panel closes and nothing has changed. */
+function closeIntro(): void {
+  introBoss = null;
+  showBossIntro(null);
+  if (screen === 'intro') screen = 'world';
+}
+
+/** Fight: the challenge goes to the server and the fight starts. */
+async function fightBoss(): Promise<void> {
+  if (screen !== 'intro' || introBoss === null) return;
+  const id = introBoss;
+  closeIntro();
+  await engage(id);
+}
+
+function introKey(event: KeyboardEvent): void {
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+  if (moveKey(event.code) || event.code === 'KeyE' || event.code === 'Space') event.preventDefault();
+  if (event.repeat) return;
+  if (['Enter', 'NumpadEnter', 'Space', 'KeyE'].includes(event.code)) void fightBoss();
+  else if (event.code === 'Escape') closeIntro();
+}
+
+bindEventPanel({ choose: (index) => void chooseEvent(index), proceed: () => void proceedEvent() });
+bindBossIntro({ fight: () => void fightBoss(), back: () => closeIntro() });
+
 /** Searches the area further: the server rolls again and the new contents take their slots. */
 async function search(): Promise<void> {
   if (busy) return;
@@ -609,7 +829,9 @@ async function interact(): Promise<void> {
   if (!shown() || menuOpen || crossing || busy) return;
   const hit = interactionNow();
   if (!hit || hit.locked) return;
+  const boss = hit.kind === 'boss' ? (contentsOf(state)?.boss ?? null) : null;
   if (hit.kind === 'search') await search();
+  else if (boss) openIntro(boss, { x: hit.x, z: hit.z });
   else if (hit.id !== null) await engage(hit.id);
 }
 
@@ -652,6 +874,14 @@ document.addEventListener('mousemove', (event) => {
 window.addEventListener('keydown', (event) => {
   if (screen === 'battle') {
     battleKey(event);
+    return;
+  }
+  if (screen === 'event') {
+    eventKey(event);
+    return;
+  }
+  if (screen === 'intro') {
+    introKey(event);
     return;
   }
   if (!inWorld() || event.ctrlKey || event.altKey || event.metaKey) return;
@@ -737,8 +967,8 @@ renderer.setAnimationLoop(() => {
     area.update(stance.x, stance.z, time);
     things?.update(stance.x, stance.z, time, dt);
     renderer.render(area.scene, eye);
-  } else if (inWorld() && layout && area) {
-    if (!menuOpen && !crossing && !loading && !busy) {
+  } else if ((inWorld() || inPanel()) && layout && area) {
+    if (inWorld() && !menuOpen && !crossing && !loading && !busy) {
       const step = walkStep(player, view.yaw, heldKeys(held), dt, walkLayout ?? layout);
       player = step.pos;
       if (step.gate) {

@@ -89,7 +89,7 @@ async def search(request: Request):
 async def engage(request: Request):
     """Meet the monster, event or boss with this id. Answers where the encounter goes on, and the fight when it is one."""
     # Imported here: the battle routes import web.world, which this module imports too.
-    from web import fight
+    from web import events, fight
     from web.routes.battle import begin_boss_battle, begin_monster_battle, opened
 
     session = get_session(request)
@@ -120,7 +120,8 @@ async def engage(request: Request):
         session.engaged_monster = None
         session.pending_event = world.take_event(session)
         save_session(request, session)
-        return {"url": "/game/event", "state": world.world_state(session), "battle": None}
+        return {"url": "/game/event", "state": world.world_state(session), "battle": None,
+                "event": events.event_view(session)}
     elif boss and boss["id"] == content_id:
         if boss["locked"]:
             return _refuse(409, "locked", boss["locked_text"])
@@ -130,4 +131,5 @@ async def engage(request: Request):
         url = answer.headers["location"]
     else:
         return _refuse(404, "not_here", "That is not here any more.")
-    return {"url": url, "state": world.world_state(session), "battle": fight.battle_view(session)}
+    return {"url": url, "state": world.world_state(session), "battle": fight.battle_view(session),
+            "event": None}

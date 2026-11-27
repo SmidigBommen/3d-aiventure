@@ -259,6 +259,8 @@ def get_all_armors_flat() -> dict:
 
 # Number of battle log lines kept in the session and shown in the arena
 BATTLE_LOG_LIMIT = 16
+# Where in an area the monster of a fight can stand
+BATTLE_PLACES = ("monster", "event", "landmark", "boss")
 
 # Healing by potion name, for saves written before potions stored healing_amount
 LEGACY_POTION_HEALING = {
@@ -373,6 +375,7 @@ class GameSession:
         self.area_contents = None     # {"location", "area_id", "seq", "monster", "event"}
         self.return_to_3d = False     # the last encounter was started from the 3D world
         self.engaged_monster = None   # contents dict of the monster being fought when it was met in the 3D world
+        self.battle_place = "monster"  # where in the area the monster of the fight stands (BATTLE_PLACES)
         # Flash messages (one-time display, cleared after read)
         self._flash = {}
 
@@ -432,6 +435,7 @@ class GameSession:
             "area_contents": self.area_contents,
             "return_to_3d": self.return_to_3d,
             "engaged_monster": self.engaged_monster,
+            "battle_place": self.battle_place,
             "_flash": self._flash,
         }
 
@@ -564,6 +568,8 @@ class GameSession:
         session.area_contents = data.get("area_contents")
         session.return_to_3d = bool(data.get("return_to_3d", False))
         session.engaged_monster = data.get("engaged_monster")
+        place = data.get("battle_place")
+        session.battle_place = place if place in BATTLE_PLACES else "monster"
         session._flash = data.get("_flash", {})
 
         # Restore location from campaign data

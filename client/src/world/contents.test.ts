@@ -63,9 +63,9 @@ const listed = (slots: ContentSlots): Vec2[] => [slots.monster, slots.event, slo
 
 const CAMPAIGN = campaignDressSpecs().map((spec) => ({ spec, name: `${spec.location}/${spec.id}`, dressing: dressArea(buildLayout(spec), spec) }));
 const FULL: AreaContents = {
-  seq: 1, monster: null, search_spot: true,
-  event: { id: 'e', title: 'T', object: 'chest', label: 'the chest' },
-  boss: { id: 'b', name: 'B', level: 5, locked: false, locked_text: null },
+  seq: 1, monster: null, search_spot: true, spent: null,
+  event: { id: 'e', title: 'T', object: 'chest', label: 'the chest', landmark: false },
+  boss: { id: 'b', name: 'B', level: 5, locked: false, locked_text: null, title: '', intro: null },
 };
 
 describe('the slots of the campaign areas', () => {
@@ -155,12 +155,12 @@ describe('the slots of the campaign areas', () => {
 });
 
 describe('interactionAt', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 } };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null };
   const layout: AreaLayout = { type: 'wilderness', floor: { halfX: 20, halfZ: 20 }, ceiling: null, walls: [], props: [], gates: [], spawn: { x: 5, z: 5 }, slots };
   const monster = { id: 'm-1', race: 'Goblin', name: 'Grak', level: 2 };
-  const event = { id: 'mossy_shrine', title: 'The Mossy Shrine', object: 'shrine', label: 'the old shrine' };
-  const boss = { id: 'Shard Guardian', name: 'The Shard Guardian', level: 5, locked: false, locked_text: null };
-  const contents = (over: Partial<AreaContents>): AreaContents => ({ seq: 1, monster: null, event: null, boss: null, search_spot: true, ...over });
+  const event = { id: 'mossy_shrine', title: 'The Mossy Shrine', object: 'shrine', label: 'the old shrine', landmark: false };
+  const boss = { id: 'Shard Guardian', name: 'The Shard Guardian', level: 5, locked: false, locked_text: null, title: 'Corrupted Spirit', intro: 'She rises.' };
+  const contents = (over: Partial<AreaContents>): AreaContents => ({ seq: 1, monster: null, event: null, spent: null, boss: null, search_spot: true, ...over });
 
   it('is null without contents, without slots, or with nothing in range', () => {
     expect(interactionAt({ x: 0, z: 0 }, layout, null)).toBeNull();
@@ -206,7 +206,7 @@ describe('interactionAt', () => {
   });
 
   it('takes the nearest; a tie goes monster, event, boss, search', () => {
-    const close: AreaLayout = { ...layout, slots: { monster: { x: -1, z: 0 }, event: { x: 1, z: 0 }, search: { x: 0, z: -1 }, boss: { x: 0, z: 1 } } };
+    const close: AreaLayout = { ...layout, slots: { monster: { x: -1, z: 0 }, event: { x: 1, z: 0 }, search: { x: 0, z: -1 }, boss: { x: 0, z: 1 }, landmark: null } };
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ monster, event, boss }))?.kind).toBe('monster');
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ event, boss }))?.kind).toBe('event');
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ boss }))?.kind).toBe('boss');
@@ -216,7 +216,7 @@ describe('interactionAt', () => {
 });
 
 describe('contentSolids', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 1 }, search: { x: 0, z: 10 }, boss: { x: 9, z: 10 } };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 1 }, search: { x: 0, z: 10 }, boss: { x: 9, z: 10 }, landmark: null };
   it('blocks at the event object and the boss, nowhere else', () => {
     expect(contentSolids(slots, null)).toEqual([]);
     expect(contentSolids(slots, { ...FULL, event: null, boss: null, monster: { id: 'm', race: 'Orc', name: 'Ug', level: 1 } })).toEqual([]);

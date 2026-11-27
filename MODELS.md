@@ -277,6 +277,42 @@ the height is in metres after scaling. Wide models are kept low so that they sta
 An event object gets a gold point light and a gold emissive pulse. The search marker carries a faint gold
 emissive, and is darkened while a monster or an event is in the area.
 
+Once its event is resolved an object either stays or is gone (`remainsOf` in `contents.ts`). The traveller,
+the townsfolk, the spirit, the tracks, the snare and the herbs are gone. Every other object stays without
+light, glow and name plate: `chest.glb` and `chest_gold.glb` with the lid node (`chest_lid`,
+`chest_gold_lid`) turned up by 1.25 rad, the others darkened to 45 %.
+
+### Discoveries
+
+The 11 events with a `special` in `json/events.json` have no object of their own on the event slot. They
+are met at the special landmark of their area, the model `SPECIAL_LANDMARKS` in
+`client/src/world/dressing.ts` already places there, so the object kinds of those events in the table
+above (runestone, forge, doorway, treasure, altar, lookout, bars, book, and chest and crystal for
+cellar_cache, geode_chamber and crystal_grove) are drawn only for an event the server does not mark
+`landmark`. While the discovery waits, a gold shell of the landmark's own model lies over it and pulses, a
+gold point light stands in front of it and its name plate shows above it. Afterwards the landmark stands
+as before.
+
+| Event | Area special | Landmark |
+|---|---|---|
+| bridge_runes | mysterious_runes | `models/env/wilderness/bridge_a.glb` |
+| cellar_cache | hidden_treasure | `models/props/chest.glb` |
+| dwarven_forge | magical_forge | `models/env/town/blacksmith_forge.glb` |
+| priests_passage | hidden_passage | `models/env/dungeon/wall_gated.glb` |
+| drowned_treasury | ancient_treasures | `models/props/chest_gold.glb` |
+| altar_of_winds | wind_blessing | `models/env/dungeon/altar_shrine_candles.glb` |
+| crystal_grove | crystal_forest | `models/props/crystal_big.glb` |
+| geode_chamber | precious_gems | `models/props/crystal_cluster.glb` |
+| shadow_towers | tactical_advantage | `models/env/dungeon/stairs_walled.glb` |
+| prisoner_cells | prisoner_rescue | `models/env/dungeon/fence_iron_bars.glb` |
+| malachars_laboratory | magical_research | `models/props/cabinet.glb` |
+
+### Bosses in a fight
+
+A boss is drawn with its row of table 1 at its scale times 1.25 (`BOSS_SCALE`), also Lady Vex on the road.
+In its rage (`bossLook(id, true)` in `client/src/battle/boss.ts`) it is 15 % larger again, glows `#ff3b2f`
+and swells by 5 % every 0.6 s. In a dungeon both sizes stay 0.2 m under the ceiling.
+
 ## 3. Packs
 
 | Pack | Author | Source | Licence | Evidence |

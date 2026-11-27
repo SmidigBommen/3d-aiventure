@@ -4,7 +4,9 @@
 //   node execution/smoke.mjs --serve --out DIR       builds nothing, but starts its own server on a
 //                                                    free port with an empty data folder (run `pnpm build` first)
 // With --serve it also fights in the 3D world: a win, an ability and an item, a flight, a defeat with
-// Rise Again, and a reload in the middle of a fight.
+// Rise Again, and a reload in the middle of a fight; it plays events in the event panel (a success, a
+// failure, one that ends in a fight, a discovery at its landmark) and fights the first boss to the end.
+// The d20 of those events is fixed through execution/smoke_server.py, which it starts the server with.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
 // failed request, HTTP status >= 400, a 3D view that renders nothing, a model that did not load,
@@ -48,7 +50,8 @@ if (serve) {
   });
   url = `http://127.0.0.1:${port}`;
   dataDir = mkdtempSync(join(tmpdir(), 'aiv-smoke-'));
-  server = spawn('uv', ['run', 'uvicorn', 'web.app:app', '--port', String(port)], {
+  server = spawn('uv', ['run', 'python', join(repo, 'execution/smoke_server.py'), '--port', String(port)], {
+    cwd: repo,
     env: { ...process.env, AIVENTURE_DATA: dataDir },
     stdio: 'ignore',
   });
@@ -269,7 +272,7 @@ async function walkTo(kind, range) {
     const { layout, player, contents } = window.__aiv;
     const goal = layout.slots[k];
     const boxes = [...layout.walls, ...layout.props];
-    if (contents?.event) boxes.push({ ...layout.slots.event, halfX: 0.5, halfZ: 0.5 });
+    if ((contents?.event && !contents.event.landmark) || (contents?.spent && !contents.spent.landmark)) boxes.push({ ...layout.slots.event, halfX: 0.5, halfZ: 0.5 });
     if (contents?.boss && layout.slots.boss) boxes.push({ ...layout.slots.boss, halfX: 0.7, halfZ: 0.7 });
     const avoid = contents?.monster && k !== 'monster' ? layout.slots.monster : null;
     const { halfX, halfZ } = layout.floor;
@@ -323,9 +326,6 @@ async function walkTo(kind, range) {
   }, kind);
   await page.waitForTimeout(100);
 }
-
-/** Whether a URL is that classic page (the server may add a slash at the end). */
-const onPath = (path) => (u) => u.pathname.replace(/\/$/, '') === path;
 
 /** Checks the prompt, in the page's report and on screen, and saves the screenshot. */
 async function promptShot(text, name) {
@@ -388,30 +388,42 @@ async function backToWalking(stance, name) {
   if (seen.battle !== null || seen.panel || seen.path !== '/') errors.push(`${name}: after the fight: battle ${JSON.stringify(seen.battle)}, panel shown ${seen.panel}, path ${seen.path}`);
 }
 
-/** Wins a battle that an event started on the classic pages, with attacks through the classic route, then shows the victory page. */
-async function winBattle() {
-  for (let round = 0; round < 200; round++) {
-    const at = await page.evaluate(async () => {
-      const r = await fetch('/battle/attack', { method: 'POST' });
-      await r.text();
-      return new URL(r.url).pathname.replace(/\/$/, '');
-    });
-    if (at === '/battle/victory') break;
-    if (at !== '/battle') throw new Error(`the fight went to ${at}`);
-  }
-  await page.goto(`${url}/battle/victory`, { waitUntil: 'load', timeout: 30000 });
-  await page.waitForSelector('#back-link', { timeout: 10000 });
+/** The URL has not left / (the events and the boss fight are played in the 3D view). */
+async function stillHome(name) {
+  const path = await page.evaluate(() => window.location.pathname);
+  if (path !== '/') errors.push(`${name}: the page left / for ${path}`);
 }
 
-/** Back at / after an encounter: the world without the title screen, at the place the encounter was started from. */
-async function backInWorld(stood, name) {
-  await page.waitForURL((u) => u.pathname === '/', { timeout: 30000 });
-  // Nobody clicks Continue here: the world has to come by itself.
-  await page.waitForFunction(() => window.__aiv && window.__aiv.screen === 'world' && !window.__aiv.loading && window.__aiv.player !== null, null, { timeout: 60000 });
-  if (await page.isVisible('#title-screen')) errors.push(`${name}: the title screen is shown on the way back`);
-  if (await page.evaluate(() => sessionStorage.getItem('aiv.return') !== null)) errors.push(`${name}: the saved place was not deleted`);
-  const me = await page.evaluate(() => window.__aiv.player);
-  if (Math.hypot(me.x - stood.x, me.z - stood.z) > 0.05) errors.push(`${name}: back at ${JSON.stringify(me)}, the encounter was started at ${JSON.stringify(stood)}`);
+/** Presses E at an event and waits for the panel with its `count` choices; still on /, the mouse free. */
+async function openEventPanel(name, count) {
+  await page.keyboard.press('KeyE');
+  await page.waitForFunction(() => window.__aiv.screen === 'event' && window.__aiv.event?.view && !document.getElementById('event-panel').hidden, null, { timeout: 30000 });
+  await page.waitForSelector('#event-choices button[data-choice]', { state: 'visible', timeout: 5000 });
+  const seen = await page.evaluate(() => ({
+    title: document.getElementById('event-title').textContent, text: document.getElementById('event-text').textContent,
+    choices: [...document.querySelectorAll('#event-choices button[data-choice]')].map((b) => b.dataset.choice),
+    view: window.__aiv.event.view, locked: document.pointerLockElement !== null, prompt: window.__aiv.prompt,
+    result: !document.getElementById('event-result').hidden,
+  }));
+  if (seen.title !== seen.view.title || seen.text !== seen.view.text) errors.push(`${name}: the panel shows "${seen.title}"`);
+  if (seen.choices.join() !== Array.from({ length: count }, (_, i) => i).join()) errors.push(`${name}: the choices are ${JSON.stringify(seen.choices)}, expected ${count}`);
+  if (seen.locked || seen.prompt !== null || seen.result) errors.push(`${name}: pointer locked ${seen.locked}, prompt ${JSON.stringify(seen.prompt)}, result shown ${seen.result}`);
+  await stillHome(name);
+}
+
+/** Sets the next d20 of the server, presses 1 and waits for the outcome. Returns what the panel shows of it. */
+async function chooseWith(d20, name) {
+  writeFileSync(join(dataDir, 'd20.txt'), String(d20));
+  await page.keyboard.press('Digit1');
+  await page.waitForFunction(() => window.__aiv.event?.result && !document.getElementById('event-result').hidden, null, { timeout: 30000 });
+  await page.waitForSelector('#event-continue', { state: 'visible', timeout: 5000 });
+  await stillHome(name);
+  return page.evaluate(() => ({
+    roll: document.getElementById('event-roll').textContent, verdict: document.getElementById('event-verdict').textContent,
+    outcome: document.getElementById('event-outcome').textContent,
+    kinds: [...document.querySelectorAll('#event-chips [data-kind]')].map((chip) => chip.dataset.kind),
+    chips: [...document.querySelectorAll('#event-chips [data-kind]')].map((chip) => chip.textContent),
+  }));
 }
 
 try {
@@ -537,7 +549,8 @@ try {
 
   // 13. What an area holds: a monster, an event object and the search spot, met and come back from.
   const encounters = ['content-monster', 'prompt-monster', 'battle-start', 'battle-turn', 'battle-victory', 'battle-after', 'content-monster-gone',
-    'battle-ability', 'battle-item', 'battle-flee', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'classic-event', 'content-event-gone', 'prompt-search', 'after-search'];
+    'battle-ability', 'battle-item', 'battle-flee', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'event-panel', 'event-reload',
+    'event-success', 'event-spent', 'event-failure', 'event-fight-result', 'event-fight', 'content-event-gone', 'prompt-search', 'after-search'];
   if (serve) {
     await slotShot('monster', 'content-monster');
     const met = await page.evaluate(() => window.__aiv.contents?.monster ?? null);
@@ -681,32 +694,94 @@ try {
     await backToWalking(stance, 'battle-reload');
     let stood;
 
+    // 13i. An event is met where its object stands: the panel over the view, no navigation.
     plant(null, { id: 'abandoned_chest' });
     await openTitle();
     await enterWorld();
     await slotShot('event', 'content-event');
     const found = await page.evaluate(() => window.__aiv.contents?.event ?? null);
-    if (found?.id !== 'abandoned_chest' || found.object !== 'chest') errors.push(`the planted event is shown as ${JSON.stringify(found)}`);
+    if (found?.id !== 'abandoned_chest' || found.object !== 'chest' || found.landmark !== false) errors.push(`the planted event is shown as ${JSON.stringify(found)}`);
     await walkTo('event', 2.6);
     await promptShot('E: look at the abandoned chest', 'prompt-event');
     stood = await page.evaluate(() => window.__aiv.player);
-    await Promise.all([page.waitForURL(onPath('/game/event'), { timeout: 30000 }), page.keyboard.press('KeyE')]);
-    await page.waitForSelector('form[action="/game/event/choose"]', { timeout: 10000 });
-    await shot('classic-event');
-    await page.locator('form[action="/game/event/choose"] button').first().click();
-    await page.waitForSelector('form[action="/game/event/continue"]', { timeout: 10000 });
-    await page.locator('form[action="/game/event/continue"] button').first().click();
-    await page.waitForURL((u) => u.pathname === '/' || onPath('/battle')(u), { timeout: 30000 });
-    if (onPath('/battle')(new URL(page.url()))) {
-      // The outcome started a fight: it is fought first.
-      await winBattle();
-      await page.click('#back-link');
-    }
-    await backInWorld(stood, 'content-event-gone');
+    await openEventPanel('event-panel', 4);
+    // Walking, the menu and Esc do nothing while the panel is open.
+    await page.keyboard.down('KeyW');
+    await page.keyboard.press('KeyM');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    await page.keyboard.up('KeyW');
+    const held = await page.evaluate(() => ({ player: window.__aiv.player, menu: window.__aiv.menuOpen, screen: window.__aiv.screen }));
+    if (Math.hypot(held.player.x - stood.x, held.player.z - stood.z) > 0.01 || held.menu || held.screen !== 'event') errors.push(`event-panel: the panel does not hold the player: ${JSON.stringify(held)}`);
+    await shot('event-panel');
+
+    // A reload while the event waits: the panel is back without the title screen, the player where they stood.
+    await page.reload({ waitUntil: 'load', timeout: 30000 });
+    await page.waitForFunction(() => window.__aiv?.screen === 'event' && !window.__aiv.loading && !document.getElementById('event-panel').hidden, null, { timeout: 60000 });
+    if (await page.isVisible('#title-screen')) errors.push('event-reload: the title screen is shown');
+    const again = await page.evaluate(() => ({ player: window.__aiv.player, view: window.__aiv.event?.view?.id ?? null }));
+    if (again.view !== 'abandoned_chest' || Math.hypot(again.player.x - stood.x, again.player.z - stood.z) > 0.05) errors.push(`event-reload: ${JSON.stringify(again)}`);
+    await shot('event-reload');
+
+    // 13j. The first choice with a 20 on the die: the roll, Success, what was gained.
+    let outcome = await chooseWith(20, 'event-success');
+    if (outcome.verdict !== 'Success' || !outcome.roll.includes('d20 20 ') || !outcome.kinds.includes('gold') || !outcome.kinds.includes('xp')) errors.push(`event-success: ${JSON.stringify(outcome)}`);
+    await shot('event-success');
+
+    // 13k. Continue: walking on from where the player stood, the chest still there, opened, and nothing to do with it.
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(inWorld, null, { timeout: 30000 });
+    const spent = await page.evaluate(() => ({
+      player: window.__aiv.player, event: window.__aiv.contents?.event ?? null, spent: window.__aiv.contents?.spent?.id ?? null,
+      prompt: window.__aiv.prompt, kind: window.__aiv.interaction?.kind ?? null, panel: !document.getElementById('event-panel').hidden,
+    }));
+    if (Math.hypot(spent.player.x - stood.x, spent.player.z - stood.z) > 0.05) errors.push(`event-spent: walking again at ${JSON.stringify(spent.player)}, the event was met at ${JSON.stringify(stood)}`);
+    if (spent.event !== null || spent.spent !== 'abandoned_chest' || spent.panel) errors.push(`event-spent: ${JSON.stringify(spent)}`);
+    if (spent.kind === 'event' || (spent.prompt ?? '').includes('chest')) errors.push(`event-spent: the spent chest still prompts "${spent.prompt}"`);
+    await stillHome('event-spent');
+    await slotShot('event', 'event-spent');
+
+    // 13l. The chest again, with a 1 on the die: Failure, and what it cost.
+    plant(null, { id: 'abandoned_chest' });
+    await openTitle();
+    await enterWorld();
+    await walkTo('event', 2.6);
+    await openEventPanel('event-failure', 4);
+    outcome = await chooseWith(1, 'event-failure');
+    if (outcome.verdict !== 'Failure' || !outcome.roll.includes('d20 1 ') || !outcome.kinds.includes('damage')) errors.push(`event-failure: ${JSON.stringify(outcome)}`);
+    await shot('event-failure');
+    await page.click('#event-continue');
+    await page.waitForFunction(inWorld, null, { timeout: 30000 });
+
+    // 13m. Tracks that lead into a fight: the monster comes out where the tracks were, still on /.
+    plant(null, { id: 'strange_tracks' });
+    await openTitle();
+    await enterWorld();
+    await walkTo('event', 2.6);
+    await openEventPanel('event-fight-result', 3);
+    outcome = await chooseWith(1, 'event-fight-result');
+    if (!outcome.chips.includes('A fight begins!')) errors.push(`event-fight-result: ${JSON.stringify(outcome)}`);
+    await shot('event-fight-result');
+    await page.keyboard.press('Space');
+    await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
+    const ambush = await page.evaluate(() => ({
+      place: window.__aiv.battle.view.monster.place, phase: window.__aiv.battle.view.phase, player: window.__aiv.player, slot: window.__aiv.layout.slots.event,
+      panel: !document.getElementById('event-panel').hidden,
+    }));
+    const reach = Math.hypot(ambush.player.x - ambush.slot.x, ambush.player.z - ambush.slot.z);
+    if (ambush.place !== 'event' || ambush.phase !== 'fight' || ambush.panel || !(reach >= 1.5 - 1e-6 && reach <= 2.5 + 1e-6)) errors.push(`event-fight: ${JSON.stringify(ambush)}`);
+    await stillHome('event-fight');
+    await page.waitForTimeout(500);
+    await untilOpen();
+    await shot('event-fight');
+    stance = await page.evaluate(() => window.__aiv.player);
+    await fightUntil('KeyA', 'victory', 'event-fight');
+    await page.keyboard.press('Enter');
+    await backToWalking(stance, 'event-fight');
     if (await page.evaluate(() => window.__aiv.contents?.event !== null)) errors.push('the event is still in the area after it was answered');
     await worldShot('content-event-gone');
 
-    // Nothing is left here (a fight from the event came from another roll), so the search spot answers.
+    // Nothing is left here but what the tracks left, so the search spot answers.
     const before = await page.evaluate(() => window.__aiv.contents.seq);
     await walkTo('search', 1.5);
     await promptShot('E: search further', 'prompt-search');
@@ -719,6 +794,39 @@ try {
     console.log(`skipped without --serve (nothing can be planted): ${encounters.join(', ')}`);
   }
 
+  // 13n. A discovery is the landmark of its area: the bridge of Rivermeet glows, and E at it opens the panel.
+  if (serve) {
+    await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+    await moveAndEnter('bridge');
+    plant(null, { id: 'bridge_runes' });
+    await openTitle();
+    await enterWorld();
+    const runes = await page.evaluate(() => ({
+      event: window.__aiv.contents?.event ?? null, point: window.__aiv.layout.slots.landmark,
+      mark: window.__aiv.dressing.placements.find((p) => p.landmark === 'special') ?? null,
+    }));
+    if (runes.event?.id !== 'bridge_runes' || runes.event.landmark !== true || !runes.point || !runes.mark) errors.push(`discovery: ${JSON.stringify(runes).slice(0, 300)}`);
+    await walkTo('landmark', 1.5);
+    await page.evaluate(() => {
+      const mark = window.__aiv.dressing.placements.find((p) => p.landmark === 'special');
+      window.__aiv.lookAt(mark.x, mark.z);
+    });
+    await promptShot('E: look at the carved runes', 'discovery');
+    await openEventPanel('discovery-panel', 2);
+    await shot('discovery-panel');
+    const told = await chooseWith(20, 'discovery-panel');
+    if (told.verdict !== 'Success') errors.push(`discovery-panel: ${JSON.stringify(told)}`);
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(inWorld, null, { timeout: 30000 });
+    const kept = await page.evaluate(() => ({ spent: window.__aiv.contents?.spent ?? null, kind: window.__aiv.interaction?.kind ?? null }));
+    if (kept.spent?.id !== 'bridge_runes' || kept.spent.landmark !== true || kept.kind === 'event') errors.push(`discovery-spent: ${JSON.stringify(kept)}`);
+    await stillHome('discovery');
+    await worldShot('discovery-spent');
+    await post('/game/travel', [['location_name', 'Whispering Woods']]);
+  } else {
+    console.log('skipped without --serve (nothing can be planted): discovery, discovery-panel, discovery-spent');
+  }
+
   // 14. The arena of the first boss, and the boss in it. The fight is not started.
   await moveAndEnter('grove');
   await landmarkShot('boss', 'area-boss');
@@ -728,6 +836,109 @@ try {
   await walkTo('boss', 2.6);
   await promptShot('E: challenge The Shard Guardian', 'prompt-boss');
   if (await page.evaluate(() => window.__aiv.interaction?.auto !== false)) errors.push('the boss would start the fight without a key press');
+
+  // 14a. The boss fight, with a character that outlasts it: the introduction, the plate, the rage, the defeat scene.
+  if (serve) {
+    const guardianData = bosses['Shard Guardian'];
+    editSession((session) => {
+      session.character.level = 20;
+      session.character.max_hit_points = session.character.current_hit_points = 9999;
+      session.defeated_bosses = ['Corrupted Captain'];
+    });
+    await openTitle();
+    await enterWorld();
+    await walkTo('boss', 2.6);
+    const engaged = [];
+    const challenge = (request) => request.method() === 'POST' && request.url().includes('/api/') && engaged.push(request.url());
+    page.on('request', challenge);
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.screen === 'intro' && !document.getElementById('boss-intro').hidden, null, { timeout: 10000 });
+    const intro = await page.evaluate(() => ({
+      id: window.__aiv.intro, name: document.getElementById('boss-intro-name').textContent, title: document.getElementById('boss-intro-title').textContent,
+      text: document.getElementById('boss-intro-text').textContent, locked: document.pointerLockElement !== null,
+    }));
+    if (intro.id !== 'Shard Guardian' || intro.name !== guardianData.name || intro.title !== guardianData.title || intro.text !== guardianData.intro || intro.locked) {
+      errors.push(`boss-intro: ${JSON.stringify(intro).slice(0, 300)}`);
+    }
+    // Step back changes nothing; walking and the menu do nothing while the panel is open.
+    await page.keyboard.press('KeyM');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__aiv.screen === 'world' && document.getElementById('boss-intro').hidden, null, { timeout: 5000 })
+      .catch(() => errors.push('boss-intro: Esc does not close the introduction'));
+    if (await page.evaluate(() => window.__aiv.menuOpen)) errors.push('boss-intro: the menu opened behind the introduction');
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.screen === 'intro', null, { timeout: 10000 });
+    if (engaged.length) errors.push(`boss-intro: requests were sent before Fight: ${engaged.join(', ')}`);
+    await stillHome('boss-intro');
+    await page.waitForTimeout(300);
+    await shot('boss-intro');
+
+    await page.click('#boss-intro-fight');
+    await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
+    await page.waitForTimeout(500);
+    await untilOpen();
+    const plate = await page.evaluate(() => ({
+      classes: document.getElementById('battle-monster').className, text: document.getElementById('battle-monster').textContent,
+      taunt: document.getElementById('battle-taunt')?.textContent ?? null, flee: document.querySelector('#battle-actions .btn-flee') !== null,
+      view: window.__aiv.battle.view.monster, intro: !document.getElementById('boss-intro').hidden,
+    }));
+    if (!plate.classes.split(' ').includes('boss') || !plate.text.includes(guardianData.name) || !plate.text.includes(guardianData.title) || !plate.text.includes('Level 5')) {
+      errors.push(`boss-fight: the plate shows "${plate.text}" with the classes "${plate.classes}"`);
+    }
+    if (!plate.taunt || !plate.view.taunt || !plate.taunt.includes(plate.view.taunt)) errors.push(`boss-fight: the taunt shown is ${JSON.stringify(plate.taunt)}, the server says ${JSON.stringify(plate.view.taunt)}`);
+    if (plate.flee || plate.intro || plate.view.place !== 'boss') errors.push(`boss-fight: flee offered ${plate.flee}, introduction shown ${plate.intro}, place ${plate.view.place}`);
+    engaged.length = 0;
+    await page.keyboard.press('KeyF');
+    await page.waitForTimeout(200);
+    if (engaged.length) errors.push(`boss-fight: F sent ${engaged.join(', ')}`);
+    page.off('request', challenge);
+    await stillHome('boss-fight');
+    await shot('boss-fight');
+
+    // Attacks until the boss flies into its rage: the banner with its line, and the look from then on.
+    let banner = null;
+    for (let turns = 0; turns < 200 && banner === null; turns++) {
+      await untilOpen();
+      const now = await page.evaluate(() => ({ result: window.__aiv.battle?.result ?? null, enraged: window.__aiv.battle?.view.monster.enraged ?? false }));
+      if (now.result !== null || now.enraged) break;
+      await page.keyboard.press('KeyA');
+      await page.waitForFunction(() => window.__aiv.battle === null || window.__aiv.battle.locked || window.__aiv.battle.result !== null, null, { timeout: 30000 });
+      // Until the turn that came back has been played, or the banner shows in it.
+      await page.waitForFunction(() => !document.getElementById('battle-enrage').hidden || window.__aiv.battle === null || window.__aiv.battle.result !== null || !window.__aiv.battle.locked, null, { timeout: 30000 });
+      if (await page.isVisible('#battle-enrage')) banner = await page.textContent('#battle-enrage');
+    }
+    if (banner !== guardianData.enrage_text) errors.push(`boss-enraged: the banner says ${JSON.stringify(banner)}, expected "${guardianData.enrage_text}"`);
+    await page.waitForTimeout(350);
+    await shot('boss-enraged');
+    await untilOpen();
+    const raging = await page.evaluate(() => ({
+      classes: document.getElementById('battle-monster').className, text: document.getElementById('battle-monster').textContent,
+      enraged: window.__aiv.battle?.view.monster.enraged ?? null, result: window.__aiv.battle?.result ?? null,
+    }));
+    if (raging.result === null && (raging.enraged !== true || !raging.classes.split(' ').includes('enraged') || !raging.text.includes('Enraged'))) errors.push(`boss-enraged: ${JSON.stringify(raging)}`);
+
+    // Attacks until it falls: its last moment, the rewards, the shard and the act it opens.
+    const facing = await page.evaluate(() => window.__aiv.player);
+    await fightUntil('KeyA', 'victory', 'boss-defeat-scene');
+    const scene = await page.evaluate(() => ({
+      lines: [...document.querySelectorAll('#battle-result .boss-line')].map((node) => [node.dataset.kind, node.textContent]),
+      order: [...document.querySelectorAll('#battle-result .boss-line, #battle-result .rewards')].map((node) => node.dataset.kind ?? 'rewards'),
+      text: document.getElementById('battle-result').textContent,
+    }));
+    const line = (kind) => (scene.lines.find(([k]) => k === kind) ?? [null, null])[1];
+    if (line('defeat') !== guardianData.defeat_text) errors.push(`boss-defeat-scene: the defeat text is ${JSON.stringify(line('defeat'))}`);
+    if (line('shard') !== 'Shard of Verdance won. Crown shards: 1 of 5.') errors.push(`boss-defeat-scene: the shard line is ${JSON.stringify(line('shard'))}`);
+    if (!/^Act 2: .+ is now open\.$/.test(line('act') ?? '')) errors.push(`boss-defeat-scene: the act line is ${JSON.stringify(line('act'))}`);
+    if (scene.order.join() !== 'defeat,rewards,shard,act') errors.push(`boss-defeat-scene: the order is ${scene.order.join()}`);
+    if (!/\+\d+ XP/.test(scene.text) || !/\+\d+ gold/.test(scene.text)) errors.push(`boss-defeat-scene: no XP and gold in "${scene.text}"`);
+    await stillHome('boss-defeat-scene');
+    await shot('boss-defeat-scene');
+    await page.keyboard.press('Enter');
+    await backToWalking(facing, 'boss-defeat-scene');
+    if (await page.evaluate(() => window.__aiv.contents?.boss !== null)) errors.push('boss-defeat-scene: the boss still stands in the grove');
+  } else {
+    console.log('skipped without --serve (the fight cannot be fixed): boss-intro, boss-fight, boss-enraged, boss-defeat-scene');
+  }
 
   // 15. The rest of Act 1.
   if (serve) defeatEveryBoss();

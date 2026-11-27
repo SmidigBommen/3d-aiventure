@@ -39,6 +39,9 @@ export interface BattleView {
   monster: {
     name: string; race: string; level: number; hp: number; max_hp: number; ac: number;
     is_boss: boolean; boss_id: string | null; title: string | null; enraged: boolean; effects: BattleEffect[];
+    taunt: string | null; // what a boss last said; null for any other monster and outside the fight
+    enrage_text: string | null; // the line of a boss's rage; null for any other monster
+    place: string; // where in the area it stands: 'monster', 'event', 'landmark' or 'boss' (contents.ts: fightSlot)
   };
   abilities: BattleAbility[];
   items: BattleItem[];
