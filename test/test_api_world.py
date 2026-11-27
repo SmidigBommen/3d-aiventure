@@ -20,7 +20,7 @@ from web import world
 CAMPAIGN = game_session.get_campaign()
 NAV_LINK = '<a href="/" class="nav-3d">3D world</a>'
 NO_CHARACTER = {"has_character": False, "character": None, "location": None, "area": None,
-                "exits": [], "pending": None}
+                "exits": [], "pending": None, "asi_points": 0}
 ALL_AREAS = [
     (act["number"], loc["name"], area["id"])
     for act in CAMPAIGN["acts"] for loc in act["locations"] for area in loc["areas"]

@@ -17,7 +17,8 @@ from weaponFactory import WeaponFactory
 from armorFactory import ArmorFactory
 from items import HealingPotion
 from character import WeaponSlot
-from engine.leveling import improve_ability
+from web import sheet
+from web.fight import Rejected
 from web.dependencies import require_character
 
 router = APIRouter()
@@ -310,8 +311,8 @@ async def character_summary(request: Request):
         "title": f"{char_data['name']} - Character Summary",
         "character": char_data,
         "abilities": ["strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma"],
-        "primary_ability": class_props.get("primary_ability", "").lower(),
-        "unarmored_defense": (class_props.get("unarmored_defense") or "").lower(),
+        "primary_ability": sheet.primary_ability(class_props),
+        "unarmored_defense": sheet.unarmored_defense(class_props),
         "improve_message": session.pop_flash("improve_message"),
         "is_new": char_data["level"] == 1 and char_data["xp"] == 0,
     })
@@ -320,18 +321,9 @@ async def character_summary(request: Request):
 @router.post("/improve")
 async def improve(request: Request, ability: str = Form(...), session=Depends(require_character)):
     """Spend one Ability Score Improvement point."""
-    char = session.character
-    primary = get_classes().get(char.class_name, {}).get("primary_ability", "Strength")
-    result = improve_ability(char, ability, primary)
-    if result:
-        modifier = result["new_modifier"]
-        message = f"{result['ability'].capitalize()} is now {result['new_score']}"
-        if result["modifier_increased"]:
-            message += f" (modifier {'+' if modifier >= 0 else ''}{modifier})"
-        if result["hp_increase"]:
-            message += f", +{result['hp_increase']} max HP"
-        if result["pp_increase"]:
-            message += f", +{result['pp_increase']} max PP"
-        session.set_flash("improve_message", message + ".")
+    try:
+        session.set_flash("improve_message", sheet.improve(session, ability))
+    except Rejected:
+        pass
     save_session(request, session)
     return RedirectResponse("/character/summary", status_code=303)

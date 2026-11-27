@@ -96,7 +96,7 @@ describe('the standing point at the special landmark', () => {
 });
 
 describe('discoveries and what is left of an event', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: { x: -10, z: 0 } };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: { x: -10, z: 0 }, rest: null };
   const layout: AreaLayout = { type: 'town', floor: { halfX: 20, halfZ: 20 }, ceiling: null, walls: [], props: [], gates: [], spawn: { x: 5, z: 5 }, slots };
   const chest: EventContent = { id: 'abandoned_chest', title: 'An Abandoned Chest', object: 'chest', label: 'the abandoned chest', landmark: false };
   const runes: EventContent = { id: 'bridge_runes', title: 'Runes', object: 'runestone', label: 'the carved runes', landmark: true };

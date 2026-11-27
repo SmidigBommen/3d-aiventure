@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
-  fetchBattle, fetchEvent, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose, postEventContinue,
-  postMove, postSearch, type WorldState,
+  fetchBattle, fetchCharacter, fetchEvent, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose,
+  postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postUnequip, type CharacterAnswer, type WorldState,
 } from './api';
 import { buildBattleScene, type BattleScene, type Rage } from './battle/battleScene';
 import { bossLook, enrageCue } from './battle/boss';
@@ -11,7 +11,7 @@ import { buildTimeline, type Cue, type Finale, type Timeline } from './battle/ti
 import { actionForKey, type BattleAction, type BattleView } from './battle/view';
 import type { Vec2 } from './input/movement';
 import { buildTitleScene } from './titleScene';
-import { hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showTitle, veil } from './ui';
+import { fade, hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showTitle, veil } from './ui';
 import { buildAreaScene, type AreaScene } from './world/areaScene';
 import { isFree } from './world/collision';
 import { buildContentScene, contentModels, underCeiling, type ContentScene } from './world/contentScene';
@@ -23,6 +23,8 @@ import { choiceForKey, type EventResult, type EventView } from './world/event';
 import { bindBossIntro, bindEventPanel, renderEvent, renderEventResult, showBossIntro, showEventPanel } from './world/eventPanel';
 import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from './world/layout';
 import { loadFigures, loadModels, modelErrors, type Figure } from './world/modelLoader';
+import { panelForKey, type InventoryView, type PanelKind, type SheetView } from './world/sheet';
+import { bindSheetPanels, renderInventory, renderSheet, showSheetPanel, type PanelMessage } from './world/sheetPanel';
 import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
 type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro';
@@ -50,6 +52,9 @@ interface Fight {
 // During a fight `screen` is 'battle', `battle` is the fight, `player` is the battle stance and
 // there is no interaction or prompt. While the event panel is open `screen` is 'event' and `event`
 // holds what it shows; while a boss is introduced `screen` is 'intro' and `intro` is the boss's id.
+// While the inventory or the character sheet is on screen `panel` names it, `screen` stays 'world'
+// and there is no interaction or prompt; `inventory` and `sheet` are the views of the last answer.
+// `resting` is true from the E press at the rest landmark until the view has faded back in.
 declare global {
   interface Window {
     __aiv: {
@@ -70,6 +75,10 @@ declare global {
       readonly battle: Fight | null;
       readonly event: Happening | null;
       readonly intro: string | null;
+      readonly panel: PanelKind | null;
+      readonly inventory: InventoryView | null;
+      readonly sheet: SheetView | null;
+      readonly resting: boolean;
       lookAt: (x: number, z: number) => void;
       interact: () => void;
     };
@@ -118,6 +127,15 @@ let playback: { timeline: Timeline; t: number; next: number; enrageAt: number | 
 let happening: Happening | null = null; // the event the panel shows
 let introBoss: string | null = null; // the boss the introduction panel shows
 
+// The inventory and the character sheet: which of the two is on screen, and the views of the last answer.
+const REST_FADE_MS = 500;
+let panel: PanelKind | null = null;
+let panelAsked = 0; // goes up with every opening and closing, so that an older answer opens nothing
+let panelLocked = false; // an action of a panel is on its way to the server
+let panelMessage: PanelMessage | null = null;
+let character: { inventory: InventoryView; sheet: SheetView } | null = null;
+let resting = false;
+
 const inWorld = (): boolean => screen === 'world' && layout !== null;
 // A panel is open over the area: the player stands where they stood and nothing walks.
 const inPanel = (): boolean => (screen === 'event' || screen === 'intro') && layout !== null;
@@ -131,8 +149,10 @@ const turn = (dYaw: number, dPitch: number): void => {
 const shown = (): boolean => (inWorld() || inFight() || inPanel()) && !loading;
 const landmarkOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'special') ?? null;
 const contentsOf = (s: WorldState | null): AreaContents | null => s?.contents ?? null;
-const interactionNow = (): Interaction | null => (inWorld() && !loading && layout ? interactionAt(player, layout, contentsOf(state)) : null);
-const promptNow = (): string | null => (menuOpen || busy || crossing ? null : (interactionNow()?.prompt ?? null));
+const interactionNow = (): Interaction | null => (inWorld() && !loading && !panel && layout ? interactionAt(player, layout, contentsOf(state)) : null);
+const promptNow = (): string | null => (menuOpen || busy || crossing || resting ? null : (interactionNow()?.prompt ?? null));
+// Nobody walks, looks around or opens anything: a panel is on screen or the view is black for a rest.
+const heldStill = (): boolean => panel !== null || resting;
 
 window.__aiv = {
   ready: false,
@@ -155,8 +175,12 @@ window.__aiv = {
   get battle() { return fight; },
   get event() { return screen === 'event' ? happening : null; },
   get intro() { return screen === 'intro' ? introBoss : null; },
+  get panel() { return panel; },
+  get inventory() { return character?.inventory ?? null; },
+  get sheet() { return character?.sheet ?? null; },
+  get resting() { return resting; },
   lookAt(x, z) {
-    if (!inWorld() || loading) return;
+    if (!inWorld() || loading || heldStill()) return;
     const t = turnTowards(view, player, { x, z });
     turn(t.dYaw, t.dPitch);
   },
@@ -180,6 +204,7 @@ function leaveWorld(): void {
   introBoss = null;
   showEventPanel(false);
   showBossIntro(null);
+  closePanel();
   things?.dispose();
   things = null;
   area?.dispose();
@@ -491,6 +516,7 @@ async function startBattle(battle: BattleView, next: WorldState): Promise<void> 
   busy = false;
   held.clear();
   setMenu(false);
+  closePanel();
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   showPrompt(null);
   hideNotice();
@@ -685,6 +711,7 @@ function holdStill(): void {
   busy = false;
   held.clear();
   setMenu(false);
+  closePanel();
   if (document.pointerLockElement === canvas) document.exitPointerLock();
   showPrompt(null);
   hideNotice();
@@ -824,13 +851,110 @@ async function search(): Promise<void> {
   busy = false;
 }
 
+// --- inventory, character sheet and rest ---------------------------------------------------------
+
+function drawPanel(): void {
+  if (!panel || !character) return;
+  if (panel === 'inventory') renderInventory(character.inventory, character.sheet, panelMessage, panelLocked);
+  else renderSheet(character.sheet, panelMessage, panelLocked);
+  showSheetPanel(panel);
+}
+
+function closePanel(): void {
+  panelAsked += 1;
+  panel = null;
+  panelLocked = false;
+  panelMessage = null;
+  showSheetPanel(null);
+}
+
+/** Whether I, C and the menu entries open a panel now: walking in the world, nothing else going on. */
+const panelAllowed = (): boolean => inWorld() && !loading && !crossing && !busy && !resting;
+
+/** Opens the inventory or the character sheet: asks the server and shows the panel when the answer is in. */
+async function openPanel(kind: PanelKind): Promise<void> {
+  if (!panelAllowed() || menuOpen) return;
+  const asked = ++panelAsked;
+  const mine = entry;
+  const answer = await fetchCharacter();
+  if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
+  if (!answer.ok) {
+    showNotice(answer.message);
+    return;
+  }
+  character = { inventory: answer.inventory, sheet: answer.sheet };
+  state = answer.state;
+  showHud(answer.state, false);
+  panel = kind;
+  panelLocked = false;
+  panelMessage = null;
+  held.clear();
+  showPrompt(null);
+  drawPanel();
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+
+/** What I, C and the menu entries do: the key of the open panel closes it, the other one switches. */
+function togglePanel(kind: PanelKind): void {
+  if (panel === kind) closePanel();
+  else void openPanel(kind);
+}
+
+/** Takes an answer of the character API: both views and the state, so that every number on screen is the new one. */
+function takeCharacter(answer: CharacterAnswer): string {
+  if (!answer.ok) return answer.message;
+  character = { inventory: answer.inventory, sheet: answer.sheet };
+  state = answer.state;
+  showHud(answer.state, false);
+  return answer.message ?? '';
+}
+
+/** What a button of a panel does: the action goes to the server and the panel is drawn again from the answer. */
+async function panelAction(send: () => Promise<CharacterAnswer>): Promise<void> {
+  if (!panel || panelLocked) return;
+  panelLocked = true;
+  drawPanel();
+  const asked = panelAsked;
+  const answer = await send();
+  if (asked !== panelAsked) return;
+  panelLocked = false;
+  panelMessage = { text: takeCharacter(answer), refused: !answer.ok };
+  drawPanel();
+}
+
+bindSheetPanels({
+  item: (action, index) => void panelAction(() => postInventory(action, index)),
+  unequip: (what) => void panelAction(() => postUnequip(what)),
+  improve: (ability) => void panelAction(() => postImprove(ability)),
+  close: () => closePanel(),
+});
+
+const wait = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+
+/** Rests at the rest landmark: the view goes black, the server restores, the view comes back. */
+async function rest(): Promise<void> {
+  if (busy || resting) return;
+  resting = true;
+  held.clear();
+  showPrompt(null);
+  hideNotice();
+  const mine = entry;
+  fade(true);
+  const [answer] = await Promise.all([postRest(), wait(REST_FADE_MS)]);
+  if (mine === entry) showNotice(takeCharacter(answer));
+  fade(false);
+  await wait(REST_FADE_MS);
+  resting = false;
+}
+
 /** What E does: whatever the prompt says. */
 async function interact(): Promise<void> {
-  if (!shown() || menuOpen || crossing || busy) return;
+  if (!shown() || menuOpen || crossing || busy || heldStill()) return;
   const hit = interactionNow();
   if (!hit || hit.locked) return;
   const boss = hit.kind === 'boss' ? (contentsOf(state)?.boss ?? null) : null;
-  if (hit.kind === 'search') await search();
+  if (hit.kind === 'rest') await rest();
+  else if (hit.kind === 'search') await search();
   else if (boss) openIntro(boss, { x: hit.x, z: hit.z });
   else if (hit.id !== null) await engage(hit.id);
 }
@@ -857,16 +981,16 @@ function setMenu(open: boolean): void {
 }
 
 canvas.addEventListener('click', () => {
-  if (inWorld() && !menuOpen) requestLock();
+  if (inWorld() && !menuOpen && !heldStill()) requestLock();
 });
 document.addEventListener('pointerlockerror', () => {});
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement === canvas) return;
   lockLostAt = performance.now();
-  if (inWorld() && !menuOpen) setMenu(true);
+  if (inWorld() && !menuOpen && !heldStill()) setMenu(true);
 });
 document.addEventListener('mousemove', (event) => {
-  if (document.pointerLockElement !== canvas || !inWorld() || menuOpen) return;
+  if (document.pointerLockElement !== canvas || !inWorld() || menuOpen || heldStill()) return;
   const t = mouseTurn(event.movementX, event.movementY);
   turn(t.dYaw, t.dPitch);
 });
@@ -885,6 +1009,24 @@ window.addEventListener('keydown', (event) => {
     return;
   }
   if (!inWorld() || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (resting) {
+    // The view is black: keys do nothing.
+    if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
+    return;
+  }
+  const wanted = panelForKey(event.code);
+  if (panel) {
+    // A panel is open: its own key or Esc closes it, the other key switches; nothing walks, E and M do nothing.
+    if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
+    if (event.repeat) return;
+    if (event.code === 'Escape') closePanel();
+    else if (wanted) togglePanel(wanted);
+    return;
+  }
+  if (wanted) {
+    if (!event.repeat && !menuOpen) togglePanel(wanted);
+    return;
+  }
   if (event.code === 'KeyM' || event.code === 'Escape') {
     if (event.repeat) return;
     // Esc with the mouse captured releases it, which already opened the menu.
@@ -908,6 +1050,14 @@ document.getElementById('menu-back')?.addEventListener('click', () => {
   setMenu(false);
   requestLock();
 });
+
+// The menu entries of the two panels: the menu closes and the panel opens.
+for (const [id, kind] of [['menu-inventory', 'inventory'], ['menu-character', 'sheet']] as [string, PanelKind][]) {
+  document.getElementById(id)?.addEventListener('click', () => {
+    setMenu(false);
+    void openPanel(kind);
+  });
+}
 
 document.getElementById('btn-continue')?.addEventListener('click', async () => {
   if (!state || !state.has_character || state.pending || busy) return;
@@ -968,7 +1118,7 @@ renderer.setAnimationLoop(() => {
     things?.update(stance.x, stance.z, time, dt);
     renderer.render(area.scene, eye);
   } else if ((inWorld() || inPanel()) && layout && area) {
-    if (inWorld() && !menuOpen && !crossing && !loading && !busy) {
+    if (inWorld() && !menuOpen && !crossing && !loading && !busy && !heldStill()) {
       const step = walkStep(player, view.yaw, heldKeys(held), dt, walkLayout ?? layout);
       player = step.pos;
       if (step.gate) {

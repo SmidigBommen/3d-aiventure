@@ -10,6 +10,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0a10; col
 #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 #veil { position: fixed; inset: 0; background: #0b0a10; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
 #veil.on { opacity: 1; }
+#veil.slow { transition: opacity 0.5s; }
 #ui { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
 .panel { pointer-events: auto; background: var(--panel); border: 1px solid rgba(212, 169, 74, 0.4); border-radius: 10px; padding: 2rem 3rem; text-align: center; }
 h1, h2 { margin: 0; font-family: var(--heading); letter-spacing: 0.08em; color: var(--gold); }
@@ -46,8 +47,52 @@ h2 { font-size: 1.6rem; margin-bottom: 1rem; }
 /* Menu */
 #menu { min-width: 22rem; }
 #menu nav { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.4rem; }
-#menu nav a { padding: 0.5rem 1rem; border-radius: 6px; color: var(--ink); text-decoration: none; font-size: 1.05rem; }
-#menu nav a:hover, #menu nav a:focus-visible { background: rgba(212, 169, 74, 0.2); color: var(--gold); outline: none; }
+#menu nav a, #menu nav button { padding: 0.5rem 1rem; border: 0; border-radius: 6px; background: transparent; color: var(--ink); text-decoration: none; font: inherit; font-size: 1.05rem; cursor: pointer; }
+#menu nav a:hover, #menu nav a:focus-visible, #menu nav button:hover, #menu nav button:focus-visible { background: rgba(212, 169, 74, 0.2); color: var(--gold); outline: none; }
+
+/* Inventory and character sheet */
+#hud-asi { bottom: 4.2rem; left: 1rem; border-color: var(--gold); color: var(--gold); font-family: var(--heading); font-size: 0.95rem; letter-spacing: 0.04em; }
+#hud.in-battle #hud-asi { display: none; }
+.sheet-like { background: rgba(18, 14, 24, 0.94); width: 40rem; max-width: 92vw; max-height: 88vh; overflow-y: auto; padding: 1.4rem 2rem; text-align: left; }
+.sheet-like h2 { text-align: center; margin-bottom: 0.4rem; }
+.sheet-like h3 { margin: 1rem 0 0.4rem; font-family: var(--heading); font-size: 1rem; letter-spacing: 0.08em; color: var(--gold); }
+.btn-small { padding: 0.25rem 0.9rem; font-size: 0.9rem; }
+.btn:disabled { opacity: 0.45; cursor: default; background: transparent; }
+.panel-message { margin: 0.4rem 0 0.6rem; padding: 0.4rem 0.8rem; border: 1px solid rgba(102, 187, 106, 0.7); border-radius: 6px; color: #7bd88f; text-align: center; }
+.panel-message.refused { border-color: rgba(239, 83, 80, 0.7); color: #ff8a80; }
+.sheet-line { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1.2rem; margin: 0.5rem 0; }
+#inv-ac, #sheet-ac { color: #8fb4ff; }
+.inv-equipped { display: flex; flex-direction: column; gap: 0.35rem; }
+.inv-slot, .inv-item { display: flex; align-items: center; gap: 0.8rem; padding: 0.45rem 0.7rem; border: 1px solid rgba(212, 169, 74, 0.3); border-radius: 6px; background: rgba(40, 32, 52, 0.6); }
+.inv-slot-label { width: 4.2rem; font-family: var(--heading); font-size: 0.85rem; color: var(--gold); }
+.inv-slot > span:nth-child(2), .inv-text { flex: 1; }
+#inv-items { display: flex; flex-direction: column; gap: 0.35rem; }
+.inv-name { font-size: 1.05rem; }
+.inv-line { font-size: 0.82rem; color: #cfc3a4; }
+.inv-line.compare-better { color: #7bd88f; }
+.inv-line.compare-worse { color: #ff8a80; }
+.inv-empty { margin: 0; font-style: italic; opacity: 0.8; }
+.panel-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 1.1rem; font-size: 0.85rem; opacity: 0.85; }
+#sheet-kind { margin: 0 0 0.5rem; text-align: center; font-style: italic; }
+.sheet-xp .bar-fill { background: #5c8fe0; }
+#sheet-points { margin: 0.4rem 0; text-align: center; font-family: var(--heading); color: var(--gold); }
+#sheet-scores { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.4rem; }
+.sheet-score { display: flex; flex-direction: column; align-items: center; gap: 0.15rem; padding: 0.45rem 0.2rem; border: 1px solid rgba(212, 169, 74, 0.3); border-radius: 6px; background: rgba(40, 32, 52, 0.6); }
+.sheet-score.primary { border-color: var(--gold); }
+.score-name { font-family: var(--heading); font-size: 0.8rem; color: var(--gold); }
+.score-value { font-size: 1.5rem; }
+.score-mod { font-size: 0.9rem; color: #cfc3a4; }
+.score-tag { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gold); }
+.sheet-improve { padding: 0.1rem 0.6rem; }
+#sheet-saves { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.sheet-chip { padding: 0.1rem 0.6rem; border: 1px solid rgba(232, 220, 196, 0.35); border-radius: 999px; font-size: 0.85rem; }
+.sheet-chip.proficient, .sheet-skill.proficient { color: var(--gold); border-color: var(--gold); }
+.sheet-text { margin: 0.15rem 0; font-size: 0.9rem; }
+#sheet-skills { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.1rem 1.2rem; font-size: 0.85rem; }
+.sheet-skill { display: flex; justify-content: space-between; }
+#sheet-abilities { display: flex; flex-direction: column; gap: 0.35rem; }
+.sheet-ability { padding: 0.4rem 0.7rem; border: 1px solid rgba(212, 169, 74, 0.3); border-radius: 6px; background: rgba(40, 32, 52, 0.6); }
+.sheet-ability-head { display: flex; justify-content: space-between; align-items: baseline; }
 
 /* Battle panel: plates, actions and log over the view, in the colours of the classic arena */
 #hud.in-battle #hud-character, #hud.in-battle #hud-keys, #hud.in-battle #prompt { display: none; }

@@ -55,6 +55,20 @@ def pending(session: GameSession):
     return None
 
 
+def rest(session: GameSession) -> str:
+    """Rest where the area allows it: hit points and power points back, effects gone."""
+    # Imported here: web.fight imports this module.
+    from web.fight import Rejected
+
+    if not session.current_area or not can_rest(session.current_area):
+        raise Rejected("cannot_rest", "There is nowhere to rest here.")
+    character = session.character
+    character.current_hit_points = character.max_hit_points
+    character.power_points = character.max_power_points
+    character.active_effects = []
+    return "You rest. Hit points and power points are restored."
+
+
 def move_to_area(session: GameSession, area_id) -> bool:
     """Step into a connected area of the current location. False (and no change) when it is not connected."""
     location = session.current_location
@@ -211,7 +225,7 @@ def world_state(session: GameSession) -> dict:
     """What the 3D client needs to show the place the character stands in."""
     if not session.character:
         return {"has_character": False, "character": None, "location": None, "area": None,
-                "exits": [], "pending": None}
+                "exits": [], "pending": None, "asi_points": 0}
 
     serialized = session.serialize_character()
     location = session.current_location
@@ -244,4 +258,5 @@ def world_state(session: GameSession) -> dict:
         ],
         "pending": pending(session),
         "contents": contents_view(session) if area else None,
+        "asi_points": serialized["asi_points"],
     }

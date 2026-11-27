@@ -6,6 +6,8 @@
 // With --serve it also fights in the 3D world: a win, an ability and an item, a flight, a defeat with
 // Rise Again, and a reload in the middle of a fight; it plays events in the event panel (a success, a
 // failure, one that ends in a fight, a discovery at its landmark) and fights the first boss to the end.
+// In both modes it opens the inventory and the character sheet; with --serve it also drinks a potion,
+// equips a weapon and an armour, spends an ability point and rests at the inn front.
 // The d20 of those events is fixed through execution/smoke_server.py, which it starts the server with.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
@@ -954,6 +956,169 @@ try {
   ];
   if (serve) for (const [locationName, name] of later) await travelAndEnter(locationName, name);
   else console.log(`skipped without --serve (Acts 2 and 3 are locked): ${later.map(([, name]) => name).join(', ')}`);
+
+  // 16b. Inventory, character sheet and rest, in the tavern of Rivermeet. With --serve the character is
+  // wounded, level 4 with its points unspent, and carries a second weapon and an armour it may use.
+  await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+  await moveAndEnter('tavern');
+  if (serve) {
+    editSession((session) => {
+      const c = session.character;
+      c.level = 4;
+      c.ability_increases = {};
+      c.max_hit_points = 40;
+      c.current_hit_points = 5;
+      c.power_points = 0;
+      c.active_effects = [];
+      c.inventory = [
+        { name: 'Small Healing Potion', type: 'potion', healing_amount: 10 },
+        { name: 'Small Healing Potion', type: 'potion', healing_amount: 10 },
+        { name: 'Greatsword', type: 'weapon' },
+        { name: 'Plate', type: 'armor' },
+      ];
+      session.area_contents = { location: session.location_name, area_id: session.area_id, seq: (session.area_contents?.seq ?? 0) + 1, monster: null, event: null };
+    });
+    await openTitle();
+    await enterWorld();
+  }
+  const panelNow = () => page.evaluate(() => ({
+    panel: window.__aiv.panel, screen: window.__aiv.screen, prompt: window.__aiv.prompt, interaction: window.__aiv.interaction, menu: window.__aiv.menuOpen,
+    inventory: window.__aiv.inventory !== null, sheet: window.__aiv.sheet !== null, player: window.__aiv.player,
+    shownInventory: !document.getElementById('inventory-panel').hidden, shownSheet: !document.getElementById('sheet-panel').hidden,
+  }));
+  const openPanel = async (key, kind, name) => {
+    await page.keyboard.press(key);
+    await page.waitForFunction((k) => window.__aiv.panel === k, kind, { timeout: 10000 });
+    const seen = await panelNow();
+    const fine = seen.screen === 'world' && seen.prompt === null && seen.interaction === null && !seen.menu && seen.inventory && seen.sheet
+      && seen.shownInventory === (kind === 'inventory') && seen.shownSheet === (kind === 'sheet');
+    if (!fine) errors.push(`${name}: ${JSON.stringify(seen)}`);
+    if (name) await shot(name);
+    return seen;
+  };
+  const closePanel = async (key, name) => {
+    await page.keyboard.press(key);
+    await page.waitForFunction(() => window.__aiv.panel === null, null, { timeout: 5000 });
+    const seen = await panelNow();
+    if (seen.menu || seen.shownInventory || seen.shownSheet || seen.screen !== 'world') errors.push(`${name}: after ${key}: ${JSON.stringify(seen)}`);
+  };
+  const opened = await openPanel('KeyI', 'inventory', 'inventory-panel');
+  // Nobody walks and M opens no menu while a panel is open.
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(300);
+  await page.keyboard.up('KeyW');
+  await page.keyboard.press('KeyM');
+  await page.keyboard.press('KeyE');
+  const still = await panelNow();
+  if (still.panel !== 'inventory' || still.menu || still.player.x !== opened.player.x || still.player.z !== opened.player.z) errors.push(`inventory-panel: W, M or E did something: ${JSON.stringify(still)}`);
+  await openPanel('KeyC', 'sheet', 'sheet-panel');
+  if (!(await page.textContent('#sheet-attack')) || !(await page.textContent('#sheet-ac'))) errors.push('sheet-panel: the attack line or the armor class is empty');
+  if ((await page.locator('#sheet-skills .sheet-skill').count()) !== 18) errors.push('sheet-panel: the sheet does not list 18 skills');
+  await closePanel('Escape', 'sheet-panel');
+  // The key of the open panel closes it; the menu entries open the panels and the menu closes.
+  await openPanel('KeyC', 'sheet', null);
+  await closePanel('KeyC', 'sheet toggle');
+  await page.keyboard.press('KeyM');
+  await page.waitForSelector('#menu', { state: 'visible', timeout: 5000 });
+  await page.keyboard.press('KeyI');
+  await page.waitForTimeout(300);
+  if ((await panelNow()).panel !== null) errors.push('I opened a panel while the menu was open');
+  await page.click('#menu-inventory');
+  await page.waitForFunction(() => window.__aiv.panel === 'inventory' && !window.__aiv.menuOpen, null, { timeout: 10000 });
+  await closePanel('KeyI', 'inventory from the menu');
+  if (new URL(page.url()).pathname !== '/') errors.push(`the panels left / for ${page.url()}`);
+
+  const sheetSteps = ['potion-drunk', 'weapon-equipped', 'armor-equipped', 'ability-badge', 'ability-spent', 'rest-prompt', 'rest-fade', 'rested'];
+  if (serve) {
+    const hud = () => page.textContent('#hud-character');
+    const hp = () => page.evaluate(() => window.__aiv.state.character.current_hit_points);
+    const clickItem = async (itemName) => {
+      const row = page.locator('#inventory-panel .inv-item', { hasText: itemName }).first();
+      await row.locator('.inv-action').click();
+    };
+    const message = async (panelId, text, name) => {
+      await page.waitForFunction(([id, t]) => document.querySelector(`#${id} .panel-message`)?.textContent === t, [panelId, text], { timeout: 10000 })
+        .catch(() => errors.push(`${name}: the panel does not say "${text}"`));
+    };
+    await openPanel('KeyI', 'inventory', null);
+    const before = { hp: await hp(), attack: await page.textContent('#inv-attack'), ac: await page.textContent('#inv-ac') };
+    if (before.hp !== 5) errors.push(`potion-drunk: the wounded character has ${before.hp} HP, not 5`);
+    await clickItem('Small Healing Potion');
+    await message('inventory-panel', 'You drink the Small Healing Potion and recover 10 HP.', 'potion-drunk');
+    if ((await hp()) !== 15 || !(await hud()).includes('HP 15/40')) errors.push(`potion-drunk: HP is ${await hp()}, the HUD says "${await hud()}"`);
+    await shot('potion-drunk');
+
+    await clickItem('Greatsword');
+    await message('inventory-panel', 'Equipped Greatsword.', 'weapon-equipped');
+    const armed = await page.evaluate(() => ({ weapon: window.__aiv.sheet.attack.weapon, line: document.getElementById('inv-attack').textContent }));
+    if (armed.weapon !== 'Greatsword' || armed.line === before.attack || !armed.line.startsWith('Greatsword:')) errors.push(`weapon-equipped: ${JSON.stringify(armed)}, before "${before.attack}"`);
+    await shot('weapon-equipped');
+
+    await clickItem('Plate');
+    await message('inventory-panel', 'Equipped Plate.', 'armor-equipped');
+    const armoured = await page.evaluate(() => ({ ac: document.getElementById('inv-ac').textContent, sheet: window.__aiv.sheet.armor_class, inventory: window.__aiv.inventory.armor_class }));
+    if (armoured.ac === before.ac || armoured.sheet !== armoured.inventory || armoured.ac !== `Armor Class ${armoured.sheet}`) errors.push(`armor-equipped: ${JSON.stringify(armoured)}, before "${before.ac}"`);
+    await shot('armor-equipped');
+    await closePanel('Escape', 'armor-equipped');
+
+    const badge = await page.evaluate(() => ({ hidden: document.getElementById('hud-asi').hidden, text: document.getElementById('hud-asi').textContent, points: window.__aiv.state.asi_points }));
+    if (badge.hidden || badge.text !== '2 ability points to spend (C)' || badge.points !== 2) errors.push(`ability-badge: ${JSON.stringify(badge)}`);
+    await shot('ability-badge');
+
+    await openPanel('KeyC', 'sheet', null);
+    const score = await page.evaluate(() => window.__aiv.sheet.strength_score);
+    if ((await page.locator('.sheet-improve').count()) !== 6) errors.push('ability-spent: not every score has a +1 button');
+    await page.click('.sheet-improve[data-ability="strength"]');
+    await page.waitForFunction((n) => window.__aiv.sheet.strength_score === n + 1, score, { timeout: 10000 })
+      .catch(() => errors.push('ability-spent: Strength did not go up'));
+    const spent = await page.evaluate(() => ({ points: window.__aiv.state.asi_points, text: document.getElementById('hud-asi').textContent, said: document.querySelector('#sheet-panel .panel-message').textContent }));
+    if (spent.points !== 1 || spent.text !== '1 ability point to spend (C)' || !spent.said.startsWith(`Strength is now ${score + 1}`)) errors.push(`ability-spent: ${JSON.stringify(spent)}`);
+    await shot('ability-spent');
+    await closePanel('Escape', 'ability-spent');
+
+    // Rest at the inn front: the view goes black, the server restores, the view comes back.
+    if (!(await page.evaluate(() => window.__aiv.layout.slots.rest !== null))) errors.push('rest-prompt: the tavern has no rest slot');
+    await walkTo('rest', 2.5);
+    await promptShot('E: rest', 'rest-prompt');
+    // The answer is held back until the screenshot is taken, so that the black view can be looked at.
+    let wake;
+    const asleep = new Promise((done) => (wake = done));
+    await page.route('**/api/rest', async (route) => {
+      await asleep;
+      await route.continue();
+    });
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.resting === true, null, { timeout: 5000 });
+    const stood = await page.evaluate(() => window.__aiv.player);
+    await page.keyboard.down('KeyW');
+    await page.keyboard.press('KeyM');
+    await page.keyboard.press('KeyI');
+    // In the headless browser the fade was seen to lag behind the clock: wait for the black instead of a fixed time.
+    await page.waitForFunction(() => Number(getComputedStyle(document.getElementById('veil')).opacity) > 0.99, null, { timeout: 15000 })
+      .catch(() => errors.push('rest-fade: the view did not go black'));
+    const dark = await page.evaluate(() => ({
+      resting: window.__aiv.resting, prompt: window.__aiv.prompt, player: window.__aiv.player, menu: window.__aiv.menuOpen, panel: window.__aiv.panel,
+      veil: Number(getComputedStyle(document.getElementById('veil')).opacity),
+    }));
+    if (!dark.resting || dark.prompt !== null || dark.menu || dark.panel !== null || dark.player.x !== stood.x || dark.player.z !== stood.z || dark.veil < 0.95) errors.push(`rest-fade: ${JSON.stringify(dark)}`);
+    await shot('rest-fade');
+    await page.keyboard.up('KeyW');
+    wake();
+    await page.waitForFunction(() => window.__aiv.resting === false, null, { timeout: 10000 });
+    await page.unroute('**/api/rest');
+    const rested = await page.evaluate(() => ({
+      c: window.__aiv.state.character, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').textContent,
+      veil: Number(getComputedStyle(document.getElementById('veil')).opacity),
+    }));
+    if (rested.c.current_hit_points !== rested.c.max_hit_points || rested.c.power_points !== rested.c.max_power_points || rested.c.max_power_points < 1) errors.push(`rested: ${JSON.stringify(rested.c)}`);
+    if (rested.notice !== 'You rest. Hit points and power points are restored.') errors.push(`rested: #notice shows ${JSON.stringify(rested.notice)}`);
+    if (rested.veil > 0.05) errors.push(`rested: the view is still dark (${rested.veil})`);
+    if (!(await hud()).includes(`HP ${rested.c.max_hit_points}/${rested.c.max_hit_points}`)) errors.push(`rested: the HUD says "${await hud()}"`);
+    await worldShot('rested');
+    if (new URL(page.url()).pathname !== '/') errors.push(`resting left / for ${page.url()}`);
+  } else {
+    console.log(`skipped without --serve (the session cannot be edited): ${sheetSteps.join(', ')}`);
+  }
 
   // 17. A model that does not load: a fresh page in the town square, with the request for the well refused.
   // That one failed request and its console message are let through; a box stands in for the well.
