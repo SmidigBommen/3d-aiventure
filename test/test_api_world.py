@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
+from dice import Dice
 import web.game_session as game_session
 from web.app import app
 from web.routes import game as game_routes
@@ -63,6 +64,16 @@ def patch(client, **changes):
         else:
             data[key] = value
     _path(client).write_text(json.dumps(data), encoding="utf-8")
+
+
+def win_initiative(monkeypatch):
+    """The player rolls 20 for initiative and the boss 1, so the boss gets no opening blow.
+
+    Without this the boss sometimes acts first and strikes a level 1 character down,
+    which ends the battle before the test looks at it.
+    """
+    rolls = iter([20])
+    monkeypatch.setattr(Dice, "roll_d20", lambda: next(rolls, 1))
 
 
 def find(act_num, location_name, area_id):
@@ -146,7 +157,8 @@ class TestState:
 
 
 class TestPending:
-    def test_battle(self, client):
+    def test_battle(self, client, monkeypatch):
+        win_initiative(monkeypatch)
         patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
         client.post("/battle/boss", follow_redirects=False)
         assert load(client)["battle"]["is_active"] is True
@@ -244,7 +256,8 @@ class TestMove:
             assert response.json()["message"]
         assert _path(client).read_bytes() == before
 
-    def test_pending_battle(self, client):
+    def test_pending_battle(self, client, monkeypatch):
+        win_initiative(monkeypatch)
         patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
         client.post("/battle/boss", follow_redirects=False)
         before = _path(client).read_bytes()
