@@ -155,7 +155,7 @@ describe('the slots of the campaign areas', () => {
 });
 
 describe('interactionAt', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null, rest: null };
   const layout: AreaLayout = { type: 'wilderness', floor: { halfX: 20, halfZ: 20 }, ceiling: null, walls: [], props: [], gates: [], spawn: { x: 5, z: 5 }, slots };
   const monster = { id: 'm-1', race: 'Goblin', name: 'Grak', level: 2 };
   const event = { id: 'mossy_shrine', title: 'The Mossy Shrine', object: 'shrine', label: 'the old shrine', landmark: false };
@@ -206,7 +206,7 @@ describe('interactionAt', () => {
   });
 
   it('takes the nearest; a tie goes monster, event, boss, search', () => {
-    const close: AreaLayout = { ...layout, slots: { monster: { x: -1, z: 0 }, event: { x: 1, z: 0 }, search: { x: 0, z: -1 }, boss: { x: 0, z: 1 }, landmark: null } };
+    const close: AreaLayout = { ...layout, slots: { monster: { x: -1, z: 0 }, event: { x: 1, z: 0 }, search: { x: 0, z: -1 }, boss: { x: 0, z: 1 }, landmark: null, rest: null } };
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ monster, event, boss }))?.kind).toBe('monster');
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ event, boss }))?.kind).toBe('event');
     expect(interactionAt({ x: 0, z: 0 }, close, contents({ boss }))?.kind).toBe('boss');
@@ -216,7 +216,7 @@ describe('interactionAt', () => {
 });
 
 describe('contentSolids', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 1 }, search: { x: 0, z: 10 }, boss: { x: 9, z: 10 }, landmark: null };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 1 }, search: { x: 0, z: 10 }, boss: { x: 9, z: 10 }, landmark: null, rest: null };
   it('blocks at the event object and the boss, nowhere else', () => {
     expect(contentSolids(slots, null)).toEqual([]);
     expect(contentSolids(slots, { ...FULL, event: null, boss: null, monster: { id: 'm', race: 'Orc', name: 'Ug', level: 1 } })).toEqual([]);

@@ -3,6 +3,7 @@
 import type { BattleAction, BattleView } from './battle/view';
 import type { AreaContents } from './world/contents';
 import type { EventResult, EventView } from './world/event';
+import type { InventoryView, ItemActionKind, SheetView } from './world/sheet';
 
 export type Danger = 'safe' | 'low' | 'med' | 'high';
 
@@ -36,6 +37,7 @@ export interface WorldState {
   exits: { id: string; name: string; danger: Danger }[];
   pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
   contents?: AreaContents | null; // what the area holds; null until the server has rolled it
+  asi_points?: number; // ability score points not yet spent
 }
 
 export type MoveAnswer = { ok: true; state: WorldState } | { ok: false; error: string; message: string };
@@ -117,6 +119,45 @@ export async function postEventChoose(choice: number): Promise<EventAnswer> {
 /** The outcome has been read. The answer carries the fight when the outcome led into one. */
 export async function postEventContinue(): Promise<EventAnswer> {
   return asEvent(await post<EventBody>('/api/event/continue'));
+}
+
+// --- inventory, character sheet and rest ---
+
+type CharacterBody = { inventory: InventoryView; sheet: SheetView; state: WorldState; message: string | null };
+export type CharacterAnswer = ({ ok: true } & CharacterBody) | Refusal;
+
+const asCharacter = (answer: { ok: true; value: CharacterBody } | Refusal): CharacterAnswer =>
+  (answer.ok ? { ok: true, inventory: answer.value.inventory, sheet: answer.value.sheet, state: answer.value.state, message: answer.value.message ?? null } : answer);
+
+/** The inventory and the character sheet as they stand. */
+export async function fetchCharacter(): Promise<CharacterAnswer> {
+  try {
+    const response = await fetch('/api/character', { credentials: 'same-origin', cache: 'no-store' });
+    const answer = await response.json();
+    if (response.ok) return asCharacter({ ok: true, value: answer as CharacterBody });
+    return { ok: false, error: String(answer.error), message: String(answer.message) };
+  } catch {
+    return { ok: false, error: 'network', message: 'The server did not answer.' };
+  }
+}
+
+/** Drinking a potion, or equipping a weapon or armor, from the backpack. */
+export async function postInventory(action: ItemActionKind, itemIndex: number): Promise<CharacterAnswer> {
+  return asCharacter(await post<CharacterBody>(`/api/inventory/${action}`, { item_index: itemIndex }));
+}
+
+export async function postUnequip(what: 'weapon' | 'armor'): Promise<CharacterAnswer> {
+  return asCharacter(await post<CharacterBody>(`/api/inventory/unequip-${what}`));
+}
+
+/** Spending one ability score point. */
+export async function postImprove(ability: string): Promise<CharacterAnswer> {
+  return asCharacter(await post<CharacterBody>('/api/character/improve', { ability }));
+}
+
+/** Resting where the area allows it. */
+export async function postRest(): Promise<CharacterAnswer> {
+  return asCharacter(await post<CharacterBody>('/api/rest'));
 }
 
 // --- the fight ---

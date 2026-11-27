@@ -21,7 +21,8 @@
       <p id="hud-description"></p>
     </div>
     <div class="hud-box" id="hud-character"></div>
-    <div class="hud-box" id="hud-keys">WASD / arrows: move · Mouse: look (click the view) · E: interact · M or Esc: menu</div>
+    <div class="hud-box" id="hud-asi" hidden></div>
+    <div class="hud-box" id="hud-keys">WASD / arrows: move · Mouse: look (click the view) · E: interact · I: inventory · C: character · M or Esc: menu</div>
     <div id="notice" hidden></div>
     <div id="prompt" hidden></div>
   </div>
@@ -76,12 +77,46 @@
       </div>
     </div>
 
+    <div id="inventory-panel" class="panel sheet-like" hidden>
+      <h2>Inventory</h2>
+      <p class="panel-message" hidden></p>
+      <div class="sheet-line"><span id="inv-attack"></span><span id="inv-ac"></span></div>
+      <div class="inv-equipped">
+        <div class="inv-slot"><span class="inv-slot-label">Weapon</span><span id="inv-weapon"></span><button class="btn btn-small" id="inv-unequip-weapon" type="button">Unequip</button></div>
+        <div class="inv-slot"><span class="inv-slot-label">Armor</span><span id="inv-armor"></span><button class="btn btn-small" id="inv-unequip-armor" type="button">Unequip</button></div>
+      </div>
+      <h3>Backpack</h3>
+      <div id="inv-items"></div>
+      <div class="panel-foot"><span>I or Esc: close · C: character</span><button class="btn btn-small btn-quiet" id="inv-close" type="button">Close</button></div>
+    </div>
+
+    <div id="sheet-panel" class="panel sheet-like" hidden>
+      <h2 id="sheet-name"></h2>
+      <p id="sheet-kind"></p>
+      <div class="bar sheet-xp"><div class="bar-fill" id="sheet-xp-fill"></div><div class="bar-text" id="sheet-xp-text"></div></div>
+      <p class="panel-message" hidden></p>
+      <div class="sheet-line" id="sheet-vitals"></div>
+      <div class="sheet-line"><span id="sheet-attack"></span><span id="sheet-ac"></span></div>
+      <p id="sheet-points" hidden></p>
+      <div id="sheet-scores"></div>
+      <h3>Saving throws</h3>
+      <div id="sheet-saves"></div>
+      <h3>Proficiencies</h3>
+      <p class="sheet-text">Weapons: <span id="sheet-weapons"></span></p>
+      <p class="sheet-text">Armor: <span id="sheet-armors"></span></p>
+      <h3>Skills</h3>
+      <div id="sheet-skills"></div>
+      <h3>Abilities</h3>
+      <div id="sheet-abilities"></div>
+      <div class="panel-foot"><span>C or Esc: close · I: inventory</span><button class="btn btn-small btn-quiet" id="sheet-close" type="button">Close</button></div>
+    </div>
+
     <div id="menu" class="panel" hidden>
       <h2>Menu</h2>
       <nav>
-        <a id="menu-location" href="/game">Location (explore, rest, shop, travel)</a>
-        <a id="menu-inventory" href="/inventory">Inventory</a>
-        <a id="menu-character" href="/character/summary">Character</a>
+        <a id="menu-location" href="/game">Location (explore, shop, travel)</a>
+        <button id="menu-inventory" type="button">Inventory</button>
+        <button id="menu-character" type="button">Character</button>
         <a id="menu-journal" href="/game/journal">Journal</a>
         <a id="menu-saves" href="/saves">Saves</a>
       </nav>

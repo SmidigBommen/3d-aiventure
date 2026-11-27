@@ -1,6 +1,7 @@
 // The HTML panels over the 3D view: title screen, heads-up display and menu. Shows what it is given.
 
 import type { WorldState } from './api';
+import { asiBadge } from './world/sheet';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const show = (node: HTMLElement, visible: boolean): void => {
@@ -54,6 +55,9 @@ export function showHud(state: WorldState, entered: boolean): void {
     el('hud-character').textContent =
       `${character.name} · Level ${character.level} · HP ${character.current_hit_points}/${character.max_hit_points} · PP ${character.power_points}/${character.max_power_points} · XP ${character.xp}/${character.xp_to_next_level} · Gold ${character.gold}`;
   }
+  const badge = asiBadge(state.asi_points ?? 0);
+  el('hud-asi').textContent = badge ?? '';
+  show(el('hud-asi'), badge !== null);
   if (entered) {
     const description = el('hud-description');
     description.textContent = area?.description ?? '';
@@ -103,5 +107,12 @@ export function hideNotice(): void {
 
 /** A black veil over the view while the next area is fetched and built. */
 export function veil(on: boolean): void {
+  el('veil').classList.remove('slow');
+  el('veil').classList.toggle('on', on);
+}
+
+/** The same veil, fading over half a second: the view goes black for a rest and comes back. */
+export function fade(on: boolean): void {
+  el('veil').classList.add('slow');
   el('veil').classList.toggle('on', on);
 }

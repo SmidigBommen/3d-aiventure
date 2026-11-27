@@ -26,10 +26,10 @@ export interface AreaContents {
   search_spot: boolean;
 }
 
-export type InteractionKind = 'monster' | 'event' | 'boss' | 'search';
+export type InteractionKind = 'monster' | 'event' | 'boss' | 'search' | 'rest';
 export interface Interaction {
   kind: InteractionKind;
-  id: string | null; // the content id to engage; null for 'search'
+  id: string | null; // the content id to engage; null for 'search' and 'rest'
   prompt: string;
   auto: boolean; // true: start without a key press
   locked: boolean; // true: E does nothing
@@ -63,7 +63,7 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   if (!contents || !slots) return null;
   const { monster, event, boss } = contents;
   const distance = (slot: Vec2): number => Math.hypot(slot.x - pos.x, slot.z - pos.z);
-  // In the order that decides a tie: monster, event, boss, search.
+  // In the order that decides a tie: monster, event, boss, search, rest.
   const candidates: [number, Interaction][] = [];
   if (monster) {
     const d = distance(slots.monster);
@@ -86,6 +86,11 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
     candidates.push([distance(slots.search), {
       kind: 'search', id: null, prompt: 'E: search further', auto: false, locked: false, x: slots.search.x, z: slots.search.z,
     }]);
+  }
+  // A slots object of before this field existed has no rest.
+  const rest = slots.rest ?? null;
+  if (rest) {
+    candidates.push([distance(rest), { kind: 'rest', id: null, prompt: 'E: rest', auto: false, locked: false, x: rest.x, z: rest.z }]);
   }
   let best: [number, Interaction] | null = null;
   for (const candidate of candidates) {

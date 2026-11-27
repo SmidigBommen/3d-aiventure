@@ -76,6 +76,7 @@ web/app.py                       FastAPI app: API, classic routes, and client/di
 web/api/                         JSON API routers (added by work items)
 web/fight.py, web/world.py       the fight and the world as functions of a session, shared by both interfaces
 web/events.py                    exploration events as functions of a session, shared by both interfaces
+web/inventory.py, web/sheet.py   the backpack and the character sheet as functions of a session, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
@@ -132,7 +133,9 @@ tools/                           balance simulator, sprite drawing, classic scre
   the last frame), `contents`, `interaction`, `prompt`, `battle` (null, or `{view, playing, locked,
   result}` during a fight, when `screen` is `'battle'` and `player` is the battle stance), `event`
   (null, or `{view, result}` while the event panel is open and `screen` is `'event'`), `intro` (null,
-  or the boss id while the boss introduction is open and `screen` is `'intro'`), and the
+  or the boss id while the boss introduction is open and `screen` is `'intro'`), `panel` (null,
+  `'inventory'` or `'sheet'` while that panel is on screen; `screen` stays `'world'`, `prompt` and
+  `interaction` are null), `inventory` and `sheet` (the views of the last answer), `resting`, and the
   actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
   boss introduction). A fight, an event and an introduction have no actions here: the smoke test
   presses the real keys.
@@ -142,14 +145,19 @@ tools/                           balance simulator, sprite drawing, classic scre
   ability and an item, a flight, a defeat with Rise Again, a reload in the middle of a fight), plays
   events in the event panel (a success, a failure, a reload, one that ends in a fight, a discovery at
   its landmark), searches, and fights the first boss from the introduction to the defeat scene; in
-  both modes it walks up to the first boss. `walkTo(slot, range)` finds a way around what stands on
+  both modes it walks up to the first boss and opens the inventory and the character sheet in the
+  tavern (I, C, Esc, the menu entries). With `--serve` it then edits its session (wounded, level 4,
+  a second weapon and armour) and drinks a potion, equips both, spends an ability point and rests at
+  the inn front, with the answer of `/api/rest` held back for the screenshot of the black view. `walkTo(slot, range)` finds a way around what stands on
   the floor.
 - With `--serve` the smoke test starts the server through `execution/smoke_server.py`, which wraps
   `Dice.roll_d20`: while `$AIVENTURE_DATA/d20.txt` holds numbers, a d20 roll takes the first one and
   removes it. Nothing under `web/`, `engine/` or `client/` reads a test setting.
-- Shop, inventory and travel still happen on the classic pages, reached from the menu (M or Esc);
-  the classic navigation links back with "3D world". Battles, events and bosses are met and played
-  in the world ("Fighting in the world" and "Events and bosses in the world" below).
+- Shop, quests, travel, journal and saves still happen on the classic pages, reached from the menu
+  (M or Esc); the classic navigation links back with "3D world". Battles, events and bosses are met
+  and played in the world ("Fighting in the world" and "Events and bosses in the world" below);
+  inventory, character sheet and rest are panels and a landmark in the world ("Inventory, character
+  sheet and rest" below).
 
 ### What an area holds
 
@@ -200,6 +208,38 @@ tools/                           balance simulator, sprite drawing, classic scre
   the player back in front of it; a fight drops it. When `/` loads with a matching entry and nothing
   pending it posts `/api/enter`, skips the title screen and puts the player there. Continue on the
   title screen posts `/api/enter` too. Nothing met in the world leaves `/`.
+
+### Inventory, character sheet and rest
+
+- **Shared functions**, in the pattern of `web/fight.py` (no `Request`, no saving; the line for the
+  player comes back, or `fight.Rejected` is raised before anything changed): `web/inventory.py`
+  (`inventory_view`, `annotated_items`, `use_potion`, `equip_weapon`, `equip_armor`,
+  `unequip_weapon`, `unequip_armor`), `web/sheet.py` (`sheet_view`, `improve`) and `world.rest`.
+  The classic routes (`/inventory/*`, `POST /character/improve`, `POST /game/rest`) are thin
+  wrappers that turn the line or the refusal into their flash message and redirect.
+- **API** (`web/api/character.py`): `GET /api/character` (writes nothing, pops no flash),
+  `POST /api/character/improve` (`{"ability"}`), `POST /api/inventory/use`, `equip-weapon`,
+  `equip-armor` (`{"item_index"}`), `unequip-weapon`, `unequip-armor` and `POST /api/rest`. Every
+  answer is `{"inventory", "sheet", "state", "message"}`, so an equip shows in the sheet's attack
+  and AC without another request. Checks in this order: `no_character`, `bad_request` (body through
+  `read_object`), `pending` (every POST while `world.pending` is set), then the action's own
+  refusal (`STATUS` in the router). The API sets no flash message.
+- **State**: `world_state` has the top-level `asi_points` (0 without a character);
+  `CHARACTER_KEYS` is unchanged.
+- **`client/src/world/sheet.ts`** (pure): the types of both views and the lines of the panels
+  (`panelForKey`, `signed`, `itemTitle`, `itemLines`, `itemAction`, `attackLine`, `xpFraction`,
+  `asiBadge`). **`client/src/world/sheetPanel.ts`** fills `#inventory-panel` and `#sheet-panel`.
+- **`main.ts`**: I and C (and `#menu-inventory`, `#menu-character`) open a panel from
+  `GET /api/character`; the key of the open panel or Esc closes it, the other key switches. While
+  one is open `screen` stays `'world'`, nobody walks, the pointer is free, and E and M do nothing.
+  A button posts its action and the panel is drawn again from the answer, with the answer's or the
+  refusal's `message` in `.panel-message`. `#hud-asi` shows `asiBadge(state.asi_points)`.
+- **Rest slot**: `slots.rest` is where one stands at the rest landmark (`landmarkPoint` in
+  `dressing.ts`, chosen after `slots.landmark` and 1.5 m off every other slot), non-null exactly
+  when the dressing placed a `rest` landmark; measured in `sheet.test.ts`. `interactionAt` offers
+  `{kind: 'rest', prompt: 'E: rest'}` within 3 m, last in a tie. E fades the view to black over
+  0.5 s (`fade` in `ui.ts`), posts `/api/rest`, fades back and shows the message in `#notice`;
+  meanwhile `resting` is true and keys do nothing.
 
 ### Events and bosses in the world
 

@@ -809,6 +809,9 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   const slots = chooseSlots({ halfX, halfZ }, solids, layout.spawn, layout.gates, paths, area.boss ? { x: arenaCentre?.x ?? 0, z: arenaCentre?.z ?? 0 } : null, arenaCentre ? bossAt : null);
   const discovery = standing.find((c) => c.placement.landmark === 'special') ?? null;
   if (discovery) slots.landmark = landmarkPoint({ halfX, halfZ }, solids, layout.spawn, layout.gates, discovery.placement.solid ?? { ...discovery.rect, height: 0 }, slots);
+  // After the special landmark's point, which it keeps off like the other slots.
+  const resting = standing.find((c) => c.placement.landmark === 'rest') ?? null;
+  if (resting) slots.rest = landmarkPoint({ halfX, halfZ }, solids, layout.spawn, layout.gates, resting.placement.solid ?? { ...resting.rect, height: 0 }, slots);
   return {
     mood: moodFor(area.location, area.type),
     placements,
@@ -950,14 +953,14 @@ function chooseSlots(
       for (const event of events.slice(0, 40)) {
         if (!apart(event, [monster], spacing)) continue;
         const search = searches.find((p) => apart(p, [monster, event], spacing));
-        if (search) return { monster, event, search, boss, landmark: null };
+        if (search) return { monster, event, search, boss, landmark: null, rest: null };
       }
     }
   }
   // No room at all (a floor smaller than any the game builds): everything beside the spawn.
   return {
     monster: { x: spawn.x + 1, z: spawn.z }, event: { x: spawn.x - 1, z: spawn.z }, search: { x: spawn.x, z: spawn.z + 1 },
-    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null,
+    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null, rest: null,
   };
 }
 
@@ -966,7 +969,7 @@ const LANDMARK_ZONE_GAP = 2.25; // m from that point to a trigger zone (the rule
 const LANDMARK_SPAWN_GAP = 1.75; // m from it to a spawn point (the rule is 1.5)
 
 /**
- * Where one stands at the special landmark `box` (its solid, or its footprint when nothing of it blocks): a
+ * Where one stands at the special or the rest landmark `box` (its solid, or its footprint when nothing of it blocks): a
  * free point beside it that can be walked to, on the side the default spawn is on, clear of the gates'
  * trigger zones and the spawn points. It keeps off what stands on the other slots where there is room.
  */
@@ -975,7 +978,7 @@ function landmarkPoint(floor: { halfX: number; halfZ: number }, solids: Box[], s
   const zones = gates.map((g) => ({ ...triggerRect(g), height: 0 }));
   const blocking = slots.boss ? [...solids, { x: slots.boss.x, z: slots.boss.z, halfX: BOSS_HALF, halfZ: BOSS_HALF, height: 2 }] : solids;
   const reached = reachable(floor, blocking, spawn);
-  const others = [slots.monster, slots.event, slots.search, ...(slots.boss ? [slots.boss] : [])];
+  const others = [slots.monster, slots.event, slots.search, ...(slots.boss ? [slots.boss] : []), ...(slots.landmark ? [slots.landmark] : [])];
   const points: Vec2[] = [];
   const span = Math.ceil((Math.max(box.halfX, box.halfZ) + 2) / FILL_GRID);
   // On the cells of the reachability check, so that `reached` speaks about the point itself.

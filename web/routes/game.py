@@ -246,14 +246,10 @@ async def event_continue(request: Request, session=Depends(require_character)):
 async def rest(request: Request, session=Depends(require_character)):
     """Rest to recover HP."""
 
-    area = session.current_area
-    if not area or not _can_rest(area):
+    try:
+        world.rest(session)
+    except fight.Rejected:
         return RedirectResponse("/game", status_code=303)
-
-    # Restore HP and PP
-    session.character.current_hit_points = session.character.max_hit_points
-    session.character.power_points = session.character.max_power_points
-    session.character.active_effects = []
     save_session(request, session)
 
     return RedirectResponse("/game?rested=true", status_code=303)
