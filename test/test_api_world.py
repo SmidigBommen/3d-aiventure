@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
+from dice import Dice
 import web.game_session as game_session
 from web.app import app
 from web.routes import game as game_routes
@@ -65,6 +66,16 @@ def patch(client, **changes):
     _path(client).write_text(json.dumps(data), encoding="utf-8")
 
 
+def win_initiative(monkeypatch):
+    """The player rolls 20 for initiative and the boss 1, so the boss gets no opening blow.
+
+    Without this the boss sometimes acts first and strikes a level 1 character down,
+    which ends the battle before the test looks at it.
+    """
+    rolls = iter([20])
+    monkeypatch.setattr(Dice, "roll_d20", lambda: next(rolls, 1))
+
+
 def find(act_num, location_name, area_id):
     act = next(a for a in CAMPAIGN["acts"] if a["number"] == act_num)
     loc = next(l for l in act["locations"] if l["name"] == location_name)
@@ -113,6 +124,8 @@ class TestState:
         assert body["area"]["has_shop"] is ("shop" in special)
         assert body["area"]["can_rest"] is any(word in special for word in ("rest", "inn", "tavern"))
         assert body["area"]["has_boss"] is bool(area.get("boss"))
+        assert body["area"]["is_boss_area"] is bool(area.get("boss"))
+        assert body["area"]["special"] == area.get("special")
         encounters = {a["id"]: a["encounters"] for a in loc["areas"]}
         assert [e["danger"] for e in body["exits"]] == [band(encounters[c]) for c in area["connections"]]
 
@@ -122,9 +135,30 @@ class TestState:
         patch(client, defeated_bosses=["Shard Guardian"])
         assert client.get("/api/state").json()["area"]["has_boss"] is False
 
+    @pytest.mark.parametrize("act_num,location_name,area_id", ALL_AREAS)
+    def test_a_boss_area_stays_one_after_the_boss_is_defeated(self, client, act_num, location_name, area_id):
+        _, _, area = find(act_num, location_name, area_id)
+        patch(client, act_num=act_num, location_name=location_name, area_id=area_id,
+              defeated_bosses=list(game_session.get_bosses()))
+        body = client.get("/api/state").json()
+        assert body["area"]["has_boss"] is False
+        assert body["area"]["is_boss_area"] is bool(area.get("boss"))
+        assert body["area"]["special"] == area.get("special")
+
+    def test_the_area_keys(self, client):
+        assert set(client.get("/api/state").json()["area"]) == {
+            "id", "name", "description", "danger", "has_shop", "can_rest", "has_boss", "is_boss_area", "special"}
+
+    def test_a_boss_that_is_not_in_the_boss_data_makes_no_boss_area(self):
+        assert world.is_boss_area({"boss": "Nobody"}) is False
+        assert world.is_boss_area({"boss": "Shard Guardian"}) is True
+        assert world.is_boss_area({}) is False
+        assert world.is_boss_area(None) is False
+
 
 class TestPending:
-    def test_battle(self, client):
+    def test_battle(self, client, monkeypatch):
+        win_initiative(monkeypatch)
         patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
         client.post("/battle/boss", follow_redirects=False)
         assert load(client)["battle"]["is_active"] is True
@@ -155,6 +189,9 @@ class TestMove:
         assert response.status_code == 200
         assert response.json() == client.get("/api/state").json()
         assert response.json()["area"]["id"] == target
+        moved = next(a for a in loc["areas"] if a["id"] == target)
+        assert response.json()["area"]["special"] == moved.get("special")
+        assert response.json()["area"]["is_boss_area"] is bool(moved.get("boss"))
         after = load(client)
         assert after["area_id"] == target
         assert {k: v for k, v in after.items() if k != "area_id"} == {k: v for k, v in before.items() if k != "area_id"}
@@ -219,7 +256,8 @@ class TestMove:
             assert response.json()["message"]
         assert _path(client).read_bytes() == before
 
-    def test_pending_battle(self, client):
+    def test_pending_battle(self, client, monkeypatch):
+        win_initiative(monkeypatch)
         patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
         client.post("/battle/boss", follow_redirects=False)
         before = _path(client).read_bytes()

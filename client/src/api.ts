@@ -18,7 +18,17 @@ export interface WorldState {
     gold: number;
   } | null;
   location: { name: string; type: string; act: { number: number; title: string } } | null;
-  area: { id: string; name: string; description: string; danger: Danger; has_shop: boolean; can_rest: boolean; has_boss: boolean } | null;
+  area: {
+    id: string;
+    name: string;
+    description: string;
+    danger: Danger;
+    has_shop: boolean;
+    can_rest: boolean;
+    has_boss: boolean; // an undefeated boss waits here
+    is_boss_area: boolean; // the campaign places a boss here, defeated or not
+    special: string | null; // the area's `special` from the campaign data
+  } | null;
   exits: { id: string; name: string; danger: Danger }[];
   pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
 }

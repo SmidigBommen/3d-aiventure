@@ -6,9 +6,14 @@ The licence text of each pack is in `licenses/`. 176 files, 32.4 MB.
 
 `node tools/validate_models.mjs client/public/models` loads every file and prints size, triangles,
 bounds, skin and clip names (needs `@gltf-transform/core` as a dev dependency).
+`node tools/make_model_manifest.mjs` measures the same bounds and triangle counts without any
+package and writes them to `client/src/world/models.json`, which the area dressing reads.
 
-Nothing here has been checked in a renderer yet: scale factors come from rest-pose bounds, and the
-choice of stand-ins from pack previews. Correct this table when a model turns out wrong on screen.
+The environment models and props that the area dressing uses (`client/src/world/dressing.ts`) have
+been drawn in the browser; what turned out differently from this table is noted under
+"Seen on screen". Creatures and NPCs have not been rendered yet: their scale factors come from
+rest-pose bounds, and the choice of stand-ins from pack previews. Correct this table when a model
+turns out wrong on screen.
 
 Heights and scale factors are computed from the rest pose and are approximate. Units differ per source, so apply the scale column.
 Clip names are exact. Several files prefix clips with the armature name, for example `CharacterArmature|Idle`.
@@ -208,6 +213,23 @@ KayKit Medieval Hexagon pieces are strategy-map miniatures. Their factors are ch
 | `models/props/shelf_large.glb` | KayKit Dungeon Remastered | wall shelf | 21 | 76 | 2 x 0.45 x 0.5 | 0.73 | 1.45 x 0.33 x 0.36 |
 | `models/props/cabinet.glb` | KayKit Furniture Bits | cabinet with decoration | 64 | 1018 | 2.04 x 1.83 x 1 | 1 | 2.04 x 1.83 x 1 |
 | `models/props/book_set.glb` | KayKit Furniture Bits | row of books | 28 | 196 | 0.78 x 0.5 x 0.36 | 0.6 | 0.47 x 0.3 x 0.22 |
+
+### Seen on screen
+
+- The dressing sets its own scale per use (a target height in metres), so the Scale column above is a
+  starting point, not what is drawn. The town buildings stand outside the town wall as a backdrop at
+  6 to 11 m; the inn front (`tavern.glb`) stands inside at 6.2 m.
+- Bounding boxes are not centred on the origin (`fence_stone.glb` sits 1 unit off in x,
+  `lantern_post.glb` reaches from -0.22 to 1.35 in z). Models are placed by bounding box.
+- `arch_stone.glb`: the legs stand 3.0 units apart up to 2 units of height, the capitals narrow the
+  opening to 2.78 units, the curve starts at 2.75 and the opening is 3.5 units high in the middle.
+- `floor_tile_large.glb` is irregular flagstones, not square tiles, and takes a tint well.
+  `floor_dirt_large.glb` is a thin dirt slab with loose stones; from above it reads as scattered pebbles.
+- `tavern.glb` carries a large barrel over the door, which makes it readable as an inn from across an area.
+- `market_stand.glb` is a dark timber frame with a small awning, darker than the pack preview suggests.
+- `hill.glb` scaled to 6 m is a flat-topped mesa about 20 m wide; it works as a mountain backdrop.
+- `crystal_cluster.glb` carries shape keys (morph targets). They are dropped on load, because the scenery is drawn instanced.
+- `bush.glb` is the only file with a blended material; it is drawn cut out (`alphaTest`) and double-sided.
 
 ## 3. Packs
 

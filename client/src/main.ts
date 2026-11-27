@@ -2,15 +2,19 @@ import * as THREE from 'three';
 import { fetchState, postMove, type WorldState } from './api';
 import type { Vec2 } from './input/movement';
 import { buildTitleScene } from './titleScene';
-import { showHud, showMenu, showTitle, veil } from './ui';
+import { hideTitle, showHud, showLoading, showMenu, showTitle, veil } from './ui';
 import { buildAreaScene, type AreaScene } from './world/areaScene';
+import { dressArea, dressSpecOf, type Dressing } from './world/dressing';
 import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from './world/layout';
+import { loadModels, modelErrors } from './world/modelLoader';
 import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
 type Screen = 'title' | 'world' | 'pending';
 
 // What the smoke test and the production check read. `ready` turns true after the first rendered
 // frame. `lookAt` is the one action: it turns the view through the function a mouse move feeds.
+// `loading` is true from the moment an area is entered until its models are in and its scene is
+// built; `layout` is the dressing's layout, the one the player collides with.
 declare global {
   interface Window {
     __aiv: {
@@ -21,6 +25,10 @@ declare global {
       readonly player: { x: number; z: number; yaw: number } | null;
       readonly layout: AreaLayout | null;
       readonly menuOpen: boolean;
+      readonly loading: boolean;
+      readonly modelErrors: string[];
+      readonly dressing: Dressing | null;
+      readonly triangles: number;
       lookAt: (x: number, z: number) => void;
     };
   }
@@ -37,7 +45,11 @@ eye.rotation.order = 'YXZ';
 let screen: Screen = 'title';
 let state: WorldState | null = null;
 let layout: AreaLayout | null = null;
+let dressing: Dressing | null = null;
 let area: AreaScene | null = null;
+let loading = false;
+let entry = 0; // goes up with every area entered or left, so that a slower, older load does not take over
+let triangles = 0;
 let player: Vec2 = { x: 0, z: 0 };
 let view: View = { yaw: 0, pitch: 0 };
 let menuOpen = false;
@@ -50,16 +62,24 @@ const turn = (dYaw: number, dPitch: number): void => {
   view = turnView(view, dYaw, dPitch);
 };
 
+// What the page reports of the area: nothing while one is loading, also on the way from gate to gate,
+// when the area left behind is still under the veil.
+const shown = (): boolean => inWorld() && !loading;
+
 window.__aiv = {
   ready: false,
   frames: 0,
   get screen() { return screen; },
   get state() { return state; },
-  get player() { return inWorld() ? { x: player.x, z: player.z, yaw: view.yaw } : null; },
-  get layout() { return inWorld() ? layout : null; },
+  get player() { return shown() ? { x: player.x, z: player.z, yaw: view.yaw } : null; },
+  get layout() { return shown() ? layout : null; },
   get menuOpen() { return menuOpen; },
+  get loading() { return loading; },
+  get modelErrors() { return modelErrors(); },
+  get dressing() { return shown() ? dressing : null; },
+  get triangles() { return triangles; },
   lookAt(x, z) {
-    if (!inWorld()) return;
+    if (!shown()) return;
     const t = turnTowards(view, player, { x, z });
     turn(t.dYaw, t.dPitch);
   },
@@ -67,35 +87,52 @@ window.__aiv = {
 
 // --- screens -----------------------------------------------------------------------------------
 
+function setLoading(on: boolean): void {
+  loading = on;
+  showLoading(on);
+}
+
 function leaveWorld(): void {
+  entry += 1;
+  setLoading(false);
   area?.dispose();
   area = null;
   layout = null;
+  dressing = null;
   held.clear();
   setMenu(false);
   if (document.pointerLockElement === canvas) document.exitPointerLock();
 }
 
-/** Builds the scene of the area in `next` and puts the player in it. */
-function enterArea(next: WorldState, cameFrom: string | null): void {
+/** Loads the models of the area in `next`, builds its scene and puts the player in it. Until then nobody walks. */
+async function enterArea(next: WorldState, cameFrom: string | null): Promise<void> {
   if (!next.location || !next.area) return;
-  const built = buildLayout({ location: next.location.name, type: next.location.type, id: next.area.id, exits: next.exits.map((e) => e.id) });
-  const start = spawnPoint(built, cameFrom);
+  const mine = ++entry;
+  setLoading(true);
+  if (screen === 'title') hideTitle();
+  const spec = dressSpecOf({ location: next.location, area: next.area, exits: next.exits });
+  const dressed = dressArea(buildLayout(spec), spec);
+  // A model that fails to load comes back as null and is drawn as a box.
+  const models = await loadModels(dressed.placements.map((p) => p.model));
+  if (mine !== entry) return;
+  const start = spawnPoint(dressed.layout, cameFrom);
   area?.dispose();
-  area = buildAreaScene(built, next.exits);
-  layout = built;
+  area = buildAreaScene(dressed, next.exits, models);
+  layout = dressed.layout;
+  dressing = dressed;
   state = next;
   player = { x: start.x, z: start.z };
   view = { yaw: start.yaw, pitch: 0 };
   screen = 'world';
   showHud(next, true);
+  setLoading(false);
 }
 
 /** Shows what the server says: the title panel, the pending link, or (when already walking) the world. */
 function apply(next: WorldState | null, keepWalking: boolean): void {
   state = next;
   if (next && next.has_character && !next.pending && next.location && next.area && keepWalking) {
-    enterArea(next, null);
+    void enterArea(next, null);
     return;
   }
   leaveWorld();
@@ -126,7 +163,7 @@ async function crossGate(gate: Gate): Promise<void> {
   veil(true);
   const answer = await postMove(gate.exitId);
   if (answer.ok && !answer.state.pending && answer.state.area) {
-    enterArea(answer.state, from);
+    await enterArea(answer.state, from);
   } else {
     // Refused: show what the server says is true now, from the default spawn or the pending link.
     await fetchState().then((next) => apply(next, true), () => apply(null, false));
@@ -198,7 +235,7 @@ document.getElementById('btn-continue')?.addEventListener('click', async () => {
   if (!state || !state.has_character || state.pending) return;
   // The gate signs are drawn with the heading font; give it a moment to arrive.
   await Promise.race([cinzel, new Promise((done) => setTimeout(done, 1500))]);
-  if (state && screen === 'title') enterArea(state, null);
+  if (state && screen === 'title' && !loading) void enterArea(state, null);
 });
 
 // --- frame loop --------------------------------------------------------------------------------
@@ -218,7 +255,7 @@ renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
   const time = clock.elapsedTime;
   if (inWorld() && layout && area) {
-    if (!menuOpen && !crossing) {
+    if (!menuOpen && !crossing && !loading) {
       const step = walkStep(player, view.yaw, heldKeys(held), dt, layout);
       player = step.pos;
       if (step.gate) void crossGate(step.gate);
@@ -231,6 +268,7 @@ renderer.setAnimationLoop(() => {
     title.update(time);
     renderer.render(title.scene, title.camera);
   }
+  triangles = renderer.info.render.triangles;
   window.__aiv.frames += 1;
   window.__aiv.ready = true;
 });
