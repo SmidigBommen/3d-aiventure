@@ -1,0 +1,16 @@
+Cute Animated Monsters Pack by Quaternius
+
+This is a record written while collecting the files, not a file shipped by the author.
+The pack's download folder contains no licence file. The licence is stated on the pack page:
+
+  https://quaternius.com/packs/cutemonsters.html
+  Text on the page: "License CC0", linking to https://creativecommons.org/publicdomain/zero/1.0/
+
+The author's other packs ship this text as License.txt (see quaternius_ultimate_monsters.txt):
+
+  License:
+  CC0 1.0 Universal (CC0 1.0)
+  Public Domain Dedication
+  https://creativecommons.org/publicdomain/zero/1.0/
+
+Checked 2026-11-27.

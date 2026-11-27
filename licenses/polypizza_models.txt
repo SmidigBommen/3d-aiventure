@@ -1,0 +1,34 @@
+Single models downloaded from poly.pizza
+
+This is a record written while collecting the files, not a file shipped by the authors.
+Each model page states the licence. The page data field reads "Licence: CC0 1.0" for every model below;
+the visible page text (checked on https://poly.pizza/m/x9x0viZs8V) reads "FBX/GLTF format • Public Domain (CC0)".
+CC0 text: https://creativecommons.org/publicdomain/zero/1.0/
+Checked 2026-11-27.
+
+kept as | title | uploader | licence on page | page | file
+models/creatures/snake.glb | Snake | Quaternius | CC0 1.0 | https://poly.pizza/m/x9x0viZs8V | https://static.poly.pizza/0f3a551e-743e-48f5-936f-804c6c3b88bd.glb
+models/props/crystal_big.glb | Big Crystal | Quaternius | CC0 1.0 | https://poly.pizza/m/pf5lzmgr2J | https://static.poly.pizza/f2bbae6a-f84c-493e-8a39-7498e90fbd49.glb
+models/props/crystal_cluster.glb | Mineral | Quaternius | CC0 1.0 | https://poly.pizza/m/STixpWYaTd | https://static.poly.pizza/0440888a-3aa3-4d44-94cd-be2beec1ee7d.glb
+models/env/wilderness/campfire.glb | Bonfire | Quaternius | CC0 1.0 | https://poly.pizza/m/Azj9hJwwwG | https://static.poly.pizza/e96d5573-fa3a-47ad-bae0-0ef9640026fa.glb
+models/env/wilderness/mushroom.glb | Mushroom | Quaternius | CC0 1.0 | https://poly.pizza/m/db1tjMhmiA | https://static.poly.pizza/c30dcc3b-c43d-4ce8-9b2d-6dd942b81fd7.glb
+models/props/anvil.glb | Workbench Anvil | Kenney | CC0 1.0 | https://poly.pizza/m/bY1pp3kAAb | https://static.poly.pizza/41562ffa-83c1-4980-9237-1e4f54efc800.glb
+models/props/statue_horse.glb | Horse Statue | Quaternius | CC0 1.0 | https://poly.pizza/m/AK9CmjFnL6 | https://static.poly.pizza/55b0aa03-543c-439d-a7d7-f0ac4c23578f.glb
+models/props/statue_stag.glb | Stag Statue | Quaternius | CC0 1.0 | https://poly.pizza/m/cKloIsNcT8 | https://static.poly.pizza/a44b71cc-0a88-4fa6-a89e-833f46fd19c2.glb
+models/env/town/signpost.glb | Signpost | Kenney | CC0 1.0 | https://poly.pizza/m/3U2lj1gpeH | https://static.poly.pizza/e9da3a7a-a1c1-4f58-84f5-67e4277a0d01.glb
+models/env/town/cart.glb | Cart | Quaternius | CC0 1.0 | https://poly.pizza/m/l7bDe7ak6j | https://static.poly.pizza/94b32c91-4d46-4172-aadd-10176a4eb543.glb
+models/env/wilderness/bush.glb | Bush | Quaternius | CC0 1.0 | https://poly.pizza/m/ooG6CkLyE8 | https://static.poly.pizza/6bbb833e-26cb-4bf9-ae67-a31b98e30bd9.glb
+models/env/wilderness/tall_grass.glb | Tall Grass | Quaternius | CC0 1.0 | https://poly.pizza/m/JSIYtscPmP | https://static.poly.pizza/83f8e6d6-fa7e-4cd8-a0ef-8c51d0ff4e88.glb
+models/env/wilderness/tree_stump_moss.glb | Tree Stump with Moss | Quaternius | CC0 1.0 | https://poly.pizza/m/nFvEbUX6LE | https://static.poly.pizza/f6caf11a-75ff-4a6e-9d87-28b44f685803.glb
+models/env/wilderness/bridge_small.glb | Small Bridge | Quaternius | CC0 1.0 | https://poly.pizza/m/j4KsIuJYnq | https://static.poly.pizza/e36966b4-e13e-46e8-aa2c-f9b643536d46.glb
+models/env/town/market_stand.glb | Market Stand | Quaternius | CC0 1.0 | https://poly.pizza/m/DGIM5HGISb | https://static.poly.pizza/e2633001-4cf5-46fa-ac68-575c9954f4ba.glb
+models/env/wilderness/tree_c.glb | Tree | Quaternius | CC0 1.0 | https://poly.pizza/m/i4QMw4L64D | https://static.poly.pizza/a2102cc2-cbe7-4bd0-8bc5-c0d4ee6e9e0d.glb
+models/npcs/hooded_adventurer.glb | Hooded Adventurer | Quaternius | CC0 1.0 | https://poly.pizza/m/y9KWOVG21R | https://static.poly.pizza/3186b8e9-afd5-4d48-846c-b2b530cd23e2.glb
+models/env/town/blacksmith_forge.glb | Blacksmith | Quaternius | CC0 1.0 | https://poly.pizza/m/bV52eTG1Aj | https://static.poly.pizza/c664d338-cf21-4cda-b0f8-efe0f0826a10.glb
+models/creatures/giant.glb | Giant | Quaternius | CC0 1.0 | https://poly.pizza/m/BldaiPtyJa | https://static.poly.pizza/260aff73-1409-4a45-9746-b078229d8cf3.glb
+models/creatures/robot.glb | Animated Robot | Quaternius | CC0 1.0 | https://poly.pizza/m/QCm7qe9uNJ | https://static.poly.pizza/7d95dbce-8c73-489b-8298-f430b1f0dbdf.glb
+models/npcs/farmer.glb | Farmer | Quaternius | CC0 1.0 | https://poly.pizza/m/7pn3R6hPvE | https://static.poly.pizza/81f2f0cf-6f53-4b57-92ea-dba0928620f2.glb
+models/npcs/woman_dress.glb | Woman in Dress | Quaternius | CC0 1.0 | https://poly.pizza/m/zMyPlQXBzq | https://static.poly.pizza/a642af96-e239-4c5f-b50d-7661ff51deec.glb
+models/npcs/adventurer_female.glb | Adventurer | Quaternius | CC0 1.0 | https://poly.pizza/m/ZwF0K7WBmu | https://static.poly.pizza/69689495-028d-4b81-8678-792338a5693e.glb
+models/creatures/king.glb | King | Quaternius | CC0 1.0 | https://poly.pizza/m/I1gTjmuK2m | https://static.poly.pizza/29a3436b-3b06-4dbf-a236-bcec18f3351a.glb
+models/npcs/adventurer_male.glb | Adventurer | Quaternius | CC0 1.0 | https://poly.pizza/m/5EGWBMpuXq | https://static.poly.pizza/bbe369ee-a686-42c7-adad-14356f5f2f15.glb
