@@ -231,6 +231,44 @@ KayKit Medieval Hexagon pieces are strategy-map miniatures. Their factors are ch
 - `crystal_cluster.glb` carries shape keys (morph targets). They are dropped on load, because the scenery is drawn instanced.
 - `bush.glb` is the only file with a blended material; it is drawn cut out (`alphaTest`) and double-sided.
 
+### Event objects and search markers
+
+What stands on the event slot and the search slot of an area (`EVENT_OBJECTS` and `SEARCH_MARKERS` in
+`client/src/world/contents.ts`). The server names the object kind of an event (`json/event_objects.json`);
+the height is in metres after scaling. Wide models are kept low so that they stay about 2 m across.
+
+| Object kind | File | Height | Tint | Events |
+|---|---|---|---|---|
+| chest | `models/props/chest.glb` | 0.8 | none | abandoned_chest, cellar_cache, and any event without an entry |
+| treasure | `models/props/chest_gold.glb` | 0.9 | none | drowned_treasury |
+| shrine | `models/props/shrine.glb` | 1.8 | none | mossy_shrine |
+| altar | `models/env/dungeon/altar_table.glb` | 0.8 | none | altar_of_winds |
+| traveller | `models/npcs/hooded_adventurer.glb` | 1.7 | none | wounded_traveler (plays its idle clip) |
+| townsfolk | `models/npcs/farmer.glb` | 1.7 | none | gambling_stranger, tavern_tale (plays its idle clip) |
+| spirit | `models/creatures/ghost.glb` | 1.8 | #bfe8ff | restless_spirit (plays its idle clip) |
+| trap | `models/env/dungeon/floor_spike_trap.glb` | 0.5 | none | trapped_corridor |
+| rubble | `models/env/dungeon/rubble_large.glb` | 0.7 | none | unstable_ceiling |
+| tracks | `models/props/bone.glb` | 0.3 | none | strange_tracks |
+| snare | `models/env/dungeon/barrier.glb` | 0.45 | none | caged_beast |
+| herbs | `models/env/wilderness/water_plant.glb` | 0.7 | #cfe8d8 | herb_patch |
+| bridge | `models/env/wilderness/bridge_small.glb` | 0.6 | none | rope_bridge |
+| runestone | `models/props/gravemarker_a.glb` | 1.3 | #9fc8d8 | bridge_runes |
+| forge | `models/props/anvil.glb` | 0.8 | none | dwarven_forge |
+| crystal | `models/props/crystal_big.glb` | 1.6 | none | geode_chamber, crystal_grove |
+| doorway | `models/env/dungeon/wall_doorway.glb` | 2 | none | priests_passage |
+| lookout | `models/env/dungeon/wall_window_closed.glb` | 2 | none | shadow_towers |
+| bars | `models/env/dungeon/fence_iron_bars.glb` | 1.2 | none | prisoner_cells |
+| book | `models/props/spellbook_open.glb` | 0.4 | none | malachars_laboratory |
+
+| Search marker | Location type | File | Height |
+|---|---|---|---|
+| trail marker | wilderness | `models/env/town/signpost.glb` | 1.1 |
+| pile of rubble | dungeon | `models/env/dungeon/rubble_half.glb` | 0.5 |
+| open crate | town | `models/env/town/crate_open.glb` | 0.7 |
+
+An event object gets a gold point light and a gold emissive pulse. The search marker carries a faint gold
+emissive, and is darkened while a monster or an event is in the area.
+
 ## 3. Packs
 
 | Pack | Author | Source | Licence | Evidence |

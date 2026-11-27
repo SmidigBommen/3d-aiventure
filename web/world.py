@@ -3,8 +3,14 @@
 None of this is a game rule; it reads the campaign data and the session.
 """
 
+import random
+import uuid
+
 from engine import campaign as campaign_rules
-from web.game_session import GameSession, get_bosses
+from engine.events import eligible_events, pick_event
+from web.game_session import GameSession, get_bosses, get_event_objects, get_events
+
+DEFAULT_LOCKED_TEXT = "The way is barred. Something else must fall first."
 
 CHARACTER_KEYS = (
     "name", "race", "class_name", "level",
@@ -58,8 +64,131 @@ def move_to_area(session: GameSession, area_id) -> bool:
     for area in location.get("areas", []):
         if area["id"] == area_id:
             session.current_area = area
+            roll_contents(session)
             return True
     return False
+
+
+def encounter_chance(area) -> float:
+    """Chance that a roll in this area gives a monster, from its 0-10 encounter rating."""
+    return min(1.0, area.get("encounters", 5) / 5.0)
+
+
+def roll_explore(session: GameSession) -> dict:
+    """The roll for what the current area holds: a monster, an event or nothing.
+
+    The one place this roll exists; classic Explore, entering an area and searching all use it.
+    Changes nothing in the session. Returns {"monster": None | {...}, "event": None | id}.
+    """
+    # Imported here: both modules import this one. EVENT_CHANCE is read at every roll.
+    from web.routes import game as game_routes
+    from web.routes.battle import pick_monster
+
+    area = session.current_area
+    location = session.current_location
+    if area.get("monster_types") and random.random() < encounter_chance(area):
+        return {"monster": pick_monster(area, location), "event": None}
+
+    # No fight: maybe something more interesting than nothing
+    if random.random() < game_routes.EVENT_CHANCE:
+        event_id = pick_event(get_events(), location.get("type") if location else None,
+                              area.get("special"), session.completed_events)
+        if event_id:
+            return {"monster": None, "event": event_id}
+    return {"monster": None, "event": None}
+
+
+def has_search_spot(area: dict, location_type, completed_events: list) -> bool:
+    """Whether a roll in this area can give anything."""
+    if area.get("monster_types") and encounter_chance(area) > 0:
+        return True
+    return any(eligible_events(get_events(), location_type, area.get("special"), completed_events))
+
+
+def stored_contents(session: GameSession):
+    """The stored contents when they belong to the area the character stands in, else None."""
+    contents = session.area_contents
+    location = session.current_location
+    area = session.current_area
+    if not contents or not location or not area:
+        return None
+    if contents.get("location") != location["name"] or contents.get("area_id") != area["id"]:
+        return None
+    return contents
+
+
+def roll_contents(session: GameSession):
+    """Roll for the current area and store the result in place of whatever was stored."""
+    if not session.current_area or not session.current_location:
+        session.area_contents = None
+        return None
+    rolled = roll_explore(session)
+    previous = session.area_contents or {}
+    session.area_contents = {
+        "location": session.current_location["name"],
+        "area_id": session.current_area["id"],
+        "seq": int(previous.get("seq", 0)) + 1,
+        "monster": {"id": uuid.uuid4().hex, **rolled["monster"]} if rolled["monster"] else None,
+        "event": {"id": rolled["event"]} if rolled["event"] else None,
+    }
+    return session.area_contents
+
+
+def take_monster(session: GameSession):
+    """Remove the monster from the current area's contents and return it (None when there is none)."""
+    contents = stored_contents(session)
+    monster = contents.get("monster") if contents else None
+    if monster:
+        contents["monster"] = None
+    return monster
+
+
+def take_event(session: GameSession):
+    """Remove the event from the current area's contents and return its id (None when there is none)."""
+    contents = stored_contents(session)
+    event = contents.get("event") if contents else None
+    if event:
+        contents["event"] = None
+    return event["id"] if event else None
+
+
+def area_boss(session: GameSession):
+    """The undefeated boss of the current area as the client shows it, or None."""
+    bosses = get_bosses()
+    boss_id = campaign_rules.get_area_boss(session.current_area, bosses, session.defeated_bosses)
+    if not boss_id:
+        return None
+    boss = bosses[boss_id]
+    locked = bool(campaign_rules.missing_requirements(boss, session.defeated_bosses))
+    return {
+        "id": boss_id,
+        "name": boss["name"],
+        "level": boss["level"],
+        "locked": locked,
+        "locked_text": boss.get("locked_text", DEFAULT_LOCKED_TEXT) if locked else None,
+    }
+
+
+def contents_view(session: GameSession):
+    """The contents of the current area for the client, or None when they are not rolled."""
+    contents = stored_contents(session)
+    if not contents:
+        return None
+    monster = contents.get("monster")
+    event = contents.get("event")
+    if event:
+        definition = get_events().get(event["id"], {})
+        title = definition.get("title", event["id"])
+        look = get_event_objects().get(event["id"], {"object": "chest", "label": title})
+        event = {"id": event["id"], "title": title, "object": look["object"], "label": look["label"]}
+    location = session.current_location
+    return {
+        "seq": contents.get("seq", 1),
+        "monster": {key: monster[key] for key in ("id", "race", "name", "level")} if monster else None,
+        "event": event,
+        "boss": area_boss(session),
+        "search_spot": has_search_spot(session.current_area, location.get("type"), session.completed_events),
+    }
 
 
 def world_state(session: GameSession) -> dict:
@@ -98,4 +227,5 @@ def world_state(session: GameSession) -> dict:
             for aid in (area.get("connections", []) if area else []) if aid in by_id
         ],
         "pending": pending(session),
+        "contents": contents_view(session) if area else None,
     }

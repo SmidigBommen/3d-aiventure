@@ -5,7 +5,7 @@
 import type { Vec2 } from '../input/movement';
 import {
   INWARD, boundaryBlocks, boundaryRuns, boxDistance, gatePoint, generator, hash, rectsOverlap, segmentHitsRect, triggerRect,
-  type AreaLayout, type AreaSpec, type Box, type Gate, type LocationType, type Rect, type Side,
+  type AreaLayout, type AreaSpec, type Box, type ContentSlots, type Gate, type LocationType, type Rect, type Side,
 } from './layout';
 import manifest from './models.json';
 
@@ -471,6 +471,7 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
     [g.spawn, { x: g.spawn.x + INWARD[g.side].x * ARRIVAL, z: g.spawn.z + INWARD[g.side].z * ARRIVAL }],
   ]);
   const zones = layout.gates.map(triggerRect);
+  const reserved: Vec2[] = []; // where the boss stands: nothing else comes near
 
   const scaleOf = (item: Item, factor: number): [number, number, number] => {
     const h = modelSize(item.model)[1];
@@ -503,8 +504,10 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
     if (Math.abs(rect.x) + rect.halfX > halfX - EDGE_MARGIN || Math.abs(rect.z) + rect.halfZ > halfZ - EDGE_MARGIN) return false;
     if (spawns.some((s) => boxDistance(s, { ...rect, height: 0 }) < SPAWN_GAP)) return false;
     if (zones.some((zone) => rectsOverlap(zone, rect, ZONE_GAP))) return false;
+    if (reserved.some((p) => boxDistance(p, { ...rect, height: 0 }) < RESERVED_GAP)) return false;
     const solid = placement.solid;
     if (solid) {
+      if (reserved.some((p) => boxDistance(p, solid) < RESERVED_SOLID_GAP)) return false;
       if (zones.some((zone) => rectsOverlap(zone, solid, SOLID_GAP))) return false;
       if (paths.some(([a, b]) => segmentHitsRect(a, b, solid, SOLID_GAP))) return false;
     }
@@ -581,11 +584,34 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
 
   // --- landmarks: the big ones first, while there is room ---
 
+  let bossAt: Vec2 | null = null;
   if (area.boss) {
     // An arena: a tall centrepiece ringed by stones. Any four of the ring that fit will do.
+    // The boss stands in front of the centrepiece, on the side of the default spawn where that is far enough
+    // from the spawn points, the gates and the lines to them; the ring leaves it room.
+    const bossSpot = (cx: number, cz: number, centre: Box | null, away: number): Vec2 | null => {
+      const toward = Math.atan2(layout.spawn.z - cz, layout.spawn.x - cx);
+      for (const eighth of [0, 1, -1, 2, -2, 3, -3, 4]) {
+        for (const reach of [3.5, 3]) {
+          const angle = toward + (eighth * Math.PI) / 4;
+          const p = { x: Math.round((cx + Math.cos(angle) * reach) * 2) / 2, z: Math.round((cz + Math.sin(angle) * reach) * 2) / 2 };
+          if (Math.abs(p.x) > halfX - 2 || Math.abs(p.z) > halfZ - 2) continue;
+          if (Math.hypot(p.x - cx, p.z - cz) > ARENA_REACH) continue;
+          if (spawns.some((s) => Math.hypot(p.x - s.x, p.z - s.z) < away)) continue;
+          if (zones.some((zone) => boxDistance(p, { ...zone, height: 0 }) < away)) continue;
+          if (paths.some(([a, b]) => segmentDistance(p, a, b) < 1 + BOSS_HALF)) continue;
+          if (centre && boxDistance(p, centre) < RESERVED_SOLID_GAP) continue;
+          return p;
+        }
+      }
+      return null;
+    };
+    let bossAway = SLOT_AWAY;
     const arena = (cx: number, cz: number, radius: number, count: number, turn: number): Candidate[] | null => {
       const centre = candidate(theme.arena.centre, 'boss', cx, cz, 0, scaleOf(theme.arena.centre, 1));
       if (!fits(centre)) return null;
+      const spot = bossSpot(cx, cz, centre.placement.solid, bossAway);
+      if (!spot) return null;
       const before = standing.length;
       standing.push(centre);
       const ring: Candidate[] = [];
@@ -593,23 +619,30 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
         const item = theme.arena.ring[i % theme.arena.ring.length];
         const angle = turn + (i * Math.PI * 2) / count;
         const c = candidate(item, 'boss', cx + Math.cos(angle) * radius, cz + Math.sin(angle) * radius, 0, scaleOf(item, 1));
-        if (fits(c)) {
+        if (boxDistance(spot, { ...c.rect, height: 0 }) >= RESERVED_GAP && boxDistance(spot, c.placement.solid ?? { ...c.rect, height: 0 }) >= RESERVED_SOLID_GAP && fits(c)) {
           ring.push(c);
           standing.push(c);
         }
       }
       standing.length = before;
-      return ring.length >= 4 ? [centre, ...ring] : null;
+      if (ring.length < 4) return null;
+      bossAt = spot;
+      return [centre, ...ring];
     };
     let built: Candidate[] | null = null;
     for (let t = 0; t < 300 && !built; t++) {
       const radius = t < 100 ? 4.5 : t < 200 ? 3.75 : 3;
       built = arena(snap(between(-(halfX - radius - 1.5), halfX - radius - 1.5)), snap(between(-(halfZ - radius - 1.5), halfZ - radius - 1.5)), radius, t < 100 ? 8 : 6, snapAngle(rnd() * Math.PI));
     }
-    for (let z = -(halfZ - 4); z <= halfZ - 4 && !built; z += 0.5) {
-      for (let x = -(halfX - 4); x <= halfX - 4 && !built; x += 0.5) built = arena(x, z, 2.5, 8, 0) ?? arena(x, z, 2.5, 8, Math.PI / 8);
+    // The last resorts: every spot on a grid, then the same with the boss nearer to where the player comes in.
+    for (const away of [SLOT_AWAY, 3]) {
+      bossAway = away;
+      for (let z = -(halfZ - 4); z <= halfZ - 4 && !built; z += 0.5) {
+        for (let x = -(halfX - 4); x <= halfX - 4 && !built; x += 0.5) built = arena(x, z, 2.5, 8, 0) ?? arena(x, z, 2.5, 8, Math.PI / 8);
+      }
     }
     built?.forEach(put);
+    if (built && bossAt) reserved.push(bossAt);
   }
   if (area.rest) place(layout.type === 'town' ? INN : CAMPFIRE, 'rest', true, layout.type === 'town' ? 0.68 : 1);
   if (area.shop) place(SHOP, 'shop', true, 0.8);
@@ -772,6 +805,8 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   }
 
   const solids = placements.filter((p) => p.solid !== null).map((p) => ({ ...(p.solid as Box), kind: 'model' as const }));
+  const arenaCentre = placements.find((p) => p.landmark === 'boss') ?? null;
+  const slots = chooseSlots({ halfX, halfZ }, solids, layout.spawn, layout.gates, paths, area.boss ? { x: arenaCentre?.x ?? 0, z: arenaCentre?.z ?? 0 } : null, arenaCentre ? bossAt : null);
   return {
     mood: moodFor(area.location, area.type),
     placements,
@@ -783,7 +818,144 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
       props: solids,
       gates: layout.gates.map((g: Gate) => ({ ...g, spawn: { ...g.spawn } })),
       spawn: { ...layout.spawn },
+      slots,
     },
+  };
+}
+
+// --- slots: where the monster, the event object, the search spot and the boss stand -------------------
+
+const FILL_GRID = 0.25; // m between the cells of the reachability check
+const FILL_CLEARANCE = 0.6; // m a cell keeps from every solid and the edge: a walker of 0.4 m passes with room to spare
+const SLOT_GRID = 0.5;
+const SLOT_SPACING = 4.25; // m between two slots (the rule is 4)
+const ARENA_REACH = 4; // m from the arena's centre to the boss (the rule is 4.5)
+const BOSS_HALF = 0.7; // m, half the side of what a boss blocks (contents.ts)
+const SLOT_AWAY = 5.25; // m from a slot to every spawn point and gate (the rule is 5)
+const RESERVED_GAP = 0.9; // m between the boss's slot and a footprint
+const RESERVED_SOLID_GAP = 1.4; // m between the boss's slot and a solid (the rule is 1)
+
+function segmentDistance(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const length2 = dx * dx + dz * dz;
+  const t = length2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / length2));
+  return Math.hypot(p.x - (a.x + dx * t), p.z - (a.z + dz * t));
+}
+
+/** The cells a walker reaches from `from`, as a test for a point (rounded to the nearest cell). */
+function reachable(floor: { halfX: number; halfZ: number }, boxes: Box[], from: Vec2): (p: Vec2) => boolean {
+  const nx = Math.round((floor.halfX * 2) / FILL_GRID) + 1;
+  const nz = Math.round((floor.halfZ * 2) / FILL_GRID) + 1;
+  const free = new Uint8Array(nx * nz);
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const p = { x: -floor.halfX + i * FILL_GRID, z: -floor.halfZ + j * FILL_GRID };
+      if (Math.abs(p.x) > floor.halfX - FILL_CLEARANCE || Math.abs(p.z) > floor.halfZ - FILL_CLEARANCE) continue;
+      if (boxes.every((box) => boxDistance(p, box) >= FILL_CLEARANCE)) free[j * nx + i] = 1;
+    }
+  }
+  const cell = (p: Vec2): number => {
+    const i = Math.round((p.x + floor.halfX) / FILL_GRID);
+    const j = Math.round((p.z + floor.halfZ) / FILL_GRID);
+    return i < 0 || j < 0 || i >= nx || j >= nz ? -1 : j * nx + i;
+  };
+  const seen = new Uint8Array(nx * nz);
+  const start = cell(from);
+  const queue: number[] = [];
+  if (start >= 0 && free[start]) {
+    seen[start] = 1;
+    queue.push(start);
+  }
+  for (let head = 0; head < queue.length; head++) {
+    const at = queue[head];
+    const i = at % nx;
+    for (const next of [i > 0 ? at - 1 : -1, i < nx - 1 ? at + 1 : -1, at - nx, at + nx]) {
+      if (next >= 0 && next < seen.length && free[next] && !seen[next]) {
+        seen[next] = 1;
+        queue.push(next);
+      }
+    }
+  }
+  return (p) => {
+    const at = cell(p);
+    return at >= 0 && seen[at] === 1;
+  };
+}
+
+/**
+ * The slots of an area, chosen after everything else stands. Each is well away from the spawn points and
+ * the gates, clear of the solids, reachable on foot, and apart from the others. The monster stands off
+ * the straight lines to the gates so that it can be walked around; the event object and the boss, which
+ * block, stand off them too. An area too crowded for the full distances gets shorter ones.
+ */
+function chooseSlots(
+  floor: { halfX: number; halfZ: number }, solids: Box[], spawn: Vec2, gates: Gate[], paths: [Vec2, Vec2][], arena: Vec2 | null, bossAt: Vec2 | null,
+): ContentSlots {
+  const spawns = [spawn, ...gates.map((g) => g.spawn)];
+  const zones = gates.map((g) => ({ ...triggerRect(g), height: 0 }));
+  const points: Vec2[] = [];
+  const reachX = Math.floor(floor.halfX - 1.5);
+  const reachZ = Math.floor(floor.halfZ - 1.5);
+  for (let z = -reachZ; z <= reachZ; z += SLOT_GRID) for (let x = -reachX; x <= reachX; x += SLOT_GRID) points.push({ x, z });
+  const fromSpawn = (p: Vec2): number => Math.hypot(p.x - spawn.x, p.z - spawn.z);
+  const apart = (p: Vec2, others: Vec2[], spacing: number): boolean => others.every((o) => Math.hypot(p.x - o.x, p.z - o.z) >= spacing);
+  const open = reachable(floor, solids, spawn);
+  let withBoss: ((p: Vec2) => boolean) | null = null;
+
+  // `away`: from spawns and gates; `clear`: from the solids; `edge`: from the floor's edge; `off`: from the lines to the gates.
+  const candidates = (away: number, clear: number, edge: number, off: number, reached: (p: Vec2) => boolean): Vec2[] =>
+    points.filter((p) =>
+      Math.abs(p.x) <= floor.halfX - edge && Math.abs(p.z) <= floor.halfZ - edge
+      && spawns.every((s) => Math.hypot(p.x - s.x, p.z - s.z) >= away)
+      && zones.every((zone) => boxDistance(p, zone) >= away)
+      && solids.every((box) => boxDistance(p, box) >= clear)
+      && paths.every(([a, b]) => segmentDistance(p, a, b) >= off)
+      && reached(p));
+
+  for (const [away, spacing, off] of [[SLOT_AWAY, SLOT_SPACING, 1], [SLOT_AWAY, SLOT_SPACING, 0], [4, 3, 0], [2.5, 2, 0], [0.5, 1, 0]]) {
+    let boss: Vec2 | null = null;
+    let reached = open;
+    if (bossAt) {
+      // The arena was built around this spot.
+      boss = bossAt;
+      reached = withBoss ??= reachable(floor, [...solids, { x: boss.x, z: boss.z, halfX: BOSS_HALF, halfZ: BOSS_HALF, height: 2 }], spawn);
+    } else if (arena) {
+      // In the arena, on the side the default spawn is on. What the boss blocks must not close a way.
+      const length = Math.hypot(spawn.x - arena.x, spawn.z - arena.z) || 1;
+      const front = { x: arena.x + ((spawn.x - arena.x) / length) * 2.5, z: arena.z + ((spawn.z - arena.z) / length) * 2.5 };
+      const options = candidates(away, 1.15, 1.6, off * (1 + BOSS_HALF), open)
+        .filter((p) => Math.hypot(p.x - arena.x, p.z - arena.z) <= ARENA_REACH)
+        .sort((a, b) => Math.hypot(a.x - front.x, a.z - front.z) - Math.hypot(b.x - front.x, b.z - front.z));
+      for (const p of options.slice(0, 12)) {
+        const around = reachable(floor, [...solids, { x: p.x, z: p.z, halfX: BOSS_HALF, halfZ: BOSS_HALF, height: 2 }], spawn);
+        const beside = [[1.5, 0], [-1.5, 0], [0, 1.5], [0, -1.5]].some(([dx, dz]) => around({ x: p.x + dx, z: p.z + dz }));
+        if (beside && spawns.every(around) && gates.every((g) => around(gatePoint(g)))) {
+          boss = p;
+          reached = around;
+          break;
+        }
+      }
+      if (!boss) continue;
+    }
+    const taken = boss ? [boss] : [];
+    // The monster and the event object near the middle, where whoever comes in sees them; the search spot far out.
+    const near = (a: Vec2, b: Vec2): number => fromSpawn(a) - fromSpawn(b);
+    const monsters = candidates(away, 1.2, 1.6, off * 2, reached).filter((p) => apart(p, taken, spacing)).sort(near);
+    const events = candidates(away, 1.6, 1.7, off * 1.75, reached).filter((p) => apart(p, taken, spacing)).sort(near);
+    const searches = candidates(away, 1.2, 1.6, 0, reached).filter((p) => apart(p, taken, spacing)).sort((a, b) => near(b, a));
+    for (const monster of monsters.slice(0, 40)) {
+      for (const event of events.slice(0, 40)) {
+        if (!apart(event, [monster], spacing)) continue;
+        const search = searches.find((p) => apart(p, [monster, event], spacing));
+        if (search) return { monster, event, search, boss };
+      }
+    }
+  }
+  // No room at all (a floor smaller than any the game builds): everything beside the spawn.
+  return {
+    monster: { x: spawn.x + 1, z: spawn.z }, event: { x: spawn.x - 1, z: spawn.z }, search: { x: spawn.x, z: spawn.z + 1 },
+    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null,
   };
 }
 

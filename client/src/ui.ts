@@ -77,6 +77,30 @@ export function showMenu(open: boolean): void {
   show(el('menu'), open);
 }
 
+/** The line that says what E does here, or nothing. */
+export function showPrompt(text: string | null): void {
+  const prompt = el('prompt');
+  if (text !== null && prompt.textContent !== text) prompt.textContent = text;
+  if (prompt.hidden !== (text === null)) show(prompt, text !== null);
+}
+
+const NOTICE_SECONDS = 3;
+let noticeTimer: number | undefined;
+
+/** A short notice above the prompt, gone after three seconds. */
+export function showNotice(text: string): void {
+  const notice = el('notice');
+  notice.textContent = text;
+  show(notice, true);
+  window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => show(notice, false), NOTICE_SECONDS * 1000);
+}
+
+export function hideNotice(): void {
+  window.clearTimeout(noticeTimer);
+  show(el('notice'), false);
+}
+
 /** A black veil over the view while the next area is fetched and built. */
 export function veil(on: boolean): void {
   el('veil').classList.toggle('on', on);

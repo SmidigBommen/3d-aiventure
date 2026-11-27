@@ -220,14 +220,143 @@ async function landmarkShot(kind, name, missing = []) {
   await worldShot(name, missing);
 }
 
-/** Marks every boss as defeated in the one session file of the data folder this test owns. */
-function defeatEveryBoss() {
+/** Changes the one session file of the data folder this test owns. */
+function editSession(change) {
   const folder = join(dataDir, 'sessions');
   const files = readdirSync(folder).filter((f) => f.endsWith('.json'));
   if (files.length !== 1) throw new Error(`expected one session file in ${folder}, found ${files.length}`);
   const session = JSON.parse(readFileSync(join(folder, files[0]), 'utf8'));
-  session.defeated_bosses = Object.keys(bosses);
+  change(session);
   writeFileSync(join(folder, files[0]), JSON.stringify(session));
+}
+
+/** Marks every boss as defeated, to unlock Acts 2 and 3. */
+function defeatEveryBoss() {
+  editSession((session) => {
+    session.defeated_bosses = Object.keys(bosses);
+  });
+}
+
+/** Puts a monster or an event (or neither) into the area the character stands in, as the next roll would. */
+function plant(monster, event) {
+  editSession((session) => {
+    session.character.max_hit_points = session.character.current_hit_points = 9999;
+    session.area_contents = {
+      location: session.location_name, area_id: session.area_id, seq: (session.area_contents?.seq ?? 0) + 1, monster, event,
+    };
+  });
+}
+
+/** Turns the view to a slot of the area and saves the screenshot. */
+async function slotShot(kind, name) {
+  await page.waitForFunction(inWorld, null, { timeout: 60000 });
+  await page.evaluate((k) => {
+    const slot = window.__aiv.layout.slots[k];
+    window.__aiv.lookAt(slot.x, slot.z);
+  }, kind);
+  await worldShot(name);
+}
+
+/**
+ * Walks with the W key to within `range` m of a slot, around what stands in the way and around a
+ * monster that is not the goal (walking into it would start the fight). Ends facing the slot.
+ */
+async function walkTo(kind, range) {
+  const path = await page.evaluate(([k, r]) => {
+    const { layout, player, contents } = window.__aiv;
+    const goal = layout.slots[k];
+    const boxes = [...layout.walls, ...layout.props];
+    if (contents?.event) boxes.push({ ...layout.slots.event, halfX: 0.5, halfZ: 0.5 });
+    if (contents?.boss && layout.slots.boss) boxes.push({ ...layout.slots.boss, halfX: 0.7, halfZ: 0.7 });
+    const avoid = contents?.monster && k !== 'monster' ? layout.slots.monster : null;
+    const { halfX, halfZ } = layout.floor;
+    const step = 0.25;
+    const nx = Math.round((halfX * 2) / step) + 1;
+    const nz = Math.round((halfZ * 2) / step) + 1;
+    const at = (i) => ({ x: -halfX + (i % nx) * step, z: -halfZ + Math.floor(i / nx) * step });
+    const free = (p) =>
+      Math.abs(p.x) <= halfX - 1.6 && Math.abs(p.z) <= halfZ - 1.6
+      && boxes.every((b) => Math.hypot(Math.max(Math.abs(p.x - b.x) - b.halfX, 0), Math.max(Math.abs(p.z - b.z) - b.halfZ, 0)) >= 0.65)
+      && (!avoid || Math.hypot(p.x - avoid.x, p.z - avoid.z) >= 1.8);
+    const start = Math.round((player.z + halfZ) / step) * nx + Math.round((player.x + halfX) / step);
+    const from = new Map([[start, -1]]);
+    const queue = [start];
+    let end = -1;
+    for (let head = 0; head < queue.length && end < 0; head++) {
+      const cell = queue[head];
+      const p = at(cell);
+      if (Math.hypot(p.x - goal.x, p.z - goal.z) <= r) end = cell;
+      for (const next of [cell - 1, cell + 1, cell - nx, cell + nx]) {
+        if (next < 0 || next >= nx * nz || from.has(next) || Math.abs((next % nx) - (cell % nx)) > 1 || !free(at(next))) continue;
+        from.set(next, cell);
+        queue.push(next);
+      }
+    }
+    if (end < 0) return null;
+    const cells = [];
+    for (let cell = end; cell !== start; cell = from.get(cell)) cells.unshift(at(cell));
+    return cells.filter((_, i) => i % 2 === 1 || i === cells.length - 1);
+  }, [kind, range]);
+  if (!path) throw new Error(`no way to the ${kind} slot`);
+  await page.keyboard.down('KeyW');
+  for (const point of path) {
+    for (let tries = 0; ; tries++) {
+      const left = await page.evaluate((p) => {
+        const me = window.__aiv.player;
+        if (!me) return -1;
+        window.__aiv.lookAt(p.x, p.z);
+        return Math.hypot(p.x - me.x, p.z - me.z);
+      }, point);
+      if (left < 0) throw new Error(`left the world on the way to the ${kind} slot`);
+      if (left < 0.3) break;
+      if (tries > 400) throw new Error(`stuck on the way to the ${kind} slot`);
+      await page.waitForTimeout(16);
+    }
+  }
+  await page.keyboard.up('KeyW');
+  await page.evaluate((k) => {
+    const slot = window.__aiv.layout.slots[k];
+    window.__aiv.lookAt(slot.x, slot.z);
+  }, kind);
+  await page.waitForTimeout(100);
+}
+
+/** Whether a URL is that classic page (the server may add a slash at the end). */
+const onPath = (path) => (u) => u.pathname.replace(/\/$/, '') === path;
+
+/** Checks the prompt, in the page's report and on screen, and saves the screenshot. */
+async function promptShot(text, name) {
+  const seen = await page.evaluate(() => ({ prompt: window.__aiv.prompt, kind: window.__aiv.interaction?.kind ?? null }));
+  if (seen.prompt !== text) errors.push(`${name}: the prompt is ${JSON.stringify(seen.prompt)}, expected "${text}"`);
+  await page.waitForFunction((t) => !document.getElementById('prompt').hidden && document.getElementById('prompt').textContent === t, text, { timeout: 5000 })
+    .catch(() => errors.push(`${name}: #prompt does not show "${text}"`));
+  await worldShot(name);
+}
+
+/** Wins the battle that is under way with attacks through the classic route, then shows the victory page. */
+async function winBattle() {
+  for (let round = 0; round < 200; round++) {
+    const at = await page.evaluate(async () => {
+      const r = await fetch('/battle/attack', { method: 'POST' });
+      await r.text();
+      return new URL(r.url).pathname.replace(/\/$/, '');
+    });
+    if (at === '/battle/victory') break;
+    if (at !== '/battle') throw new Error(`the fight went to ${at}`);
+  }
+  await page.goto(`${url}/battle/victory`, { waitUntil: 'load', timeout: 30000 });
+  await page.waitForSelector('#back-link', { timeout: 10000 });
+}
+
+/** Back at / after an encounter: the world without the title screen, at the place the encounter was started from. */
+async function backInWorld(stood, name) {
+  await page.waitForURL((u) => u.pathname === '/', { timeout: 30000 });
+  // Nobody clicks Continue here: the world has to come by itself.
+  await page.waitForFunction(() => window.__aiv && window.__aiv.screen === 'world' && !window.__aiv.loading && window.__aiv.player !== null, null, { timeout: 60000 });
+  if (await page.isVisible('#title-screen')) errors.push(`${name}: the title screen is shown on the way back`);
+  if (await page.evaluate(() => sessionStorage.getItem('aiv.return') !== null)) errors.push(`${name}: the saved place was not deleted`);
+  const me = await page.evaluate(() => window.__aiv.player);
+  if (Math.hypot(me.x - stood.x, me.z - stood.z) > 0.05) errors.push(`${name}: back at ${JSON.stringify(me)}, the encounter was started at ${JSON.stringify(stood)}`);
 }
 
 try {
@@ -341,14 +470,88 @@ try {
   await page.unroute('**/models/**');
   if (await page.isVisible('#loading')) errors.push('the loading indicator stays after the area is loaded');
 
-  // 12. The rest of Act 1, and the arena of its first boss.
-  if (serve) defeatEveryBoss();
-  await travelAndEnter('Whispering Woods', 'loc-whispering-woods');
+  // 12. The Whispering Woods. With --serve a goblin is planted at the entrance before the world is entered.
+  const GOBLIN = { id: 'smoke-goblin', race: 'Goblin', class_name: 'Rogue', level: 1, name: 'Grak', weapon: 'Club' };
+  await post('/game/travel', [['location_name', 'Whispering Woods']]);
+  if (serve) plant(GOBLIN, null);
+  await openTitle();
+  const woods = await enterWorld();
+  if (woods.location.name !== 'Whispering Woods' || woods.area.id !== 'entrance') errors.push(`travelled to the Whispering Woods but the world shows ${woods.location.name}/${woods.area.id}`);
+  await worldShot('loc-whispering-woods');
+
+  // 13. What an area holds: a monster, an event object and the search spot, met and come back from.
+  const encounters = ['content-monster', 'prompt-monster', 'classic-battle', 'classic-victory', 'content-monster-gone',
+    'content-event', 'prompt-event', 'classic-event', 'content-event-gone', 'prompt-search', 'after-search'];
+  if (serve) {
+    await slotShot('monster', 'content-monster');
+    const met = await page.evaluate(() => window.__aiv.contents?.monster ?? null);
+    if (met?.id !== GOBLIN.id || met.name !== GOBLIN.name || met.race !== 'Goblin' || met.level !== 1) errors.push(`the planted goblin is shown as ${JSON.stringify(met)}`);
+    await walkTo('monster', 2.6);
+    await promptShot('E: fight Grak the Goblin', 'prompt-monster');
+    let stood = await page.evaluate(() => window.__aiv.player);
+    await Promise.all([page.waitForURL(onPath('/battle'), { timeout: 30000 }), page.keyboard.press('KeyE')]);
+    await page.waitForSelector('.battle-scene', { timeout: 10000 });
+    await shot('classic-battle');
+    await winBattle();
+    await shot('classic-victory');
+    await page.click('#back-link');
+    await backInWorld(stood, 'content-monster-gone');
+    if (await page.evaluate(() => window.__aiv.contents?.monster !== null)) errors.push('the monster is still in the area after the fight');
+    await worldShot('content-monster-gone');
+
+    plant(null, { id: 'abandoned_chest' });
+    await openTitle();
+    await enterWorld();
+    await slotShot('event', 'content-event');
+    const found = await page.evaluate(() => window.__aiv.contents?.event ?? null);
+    if (found?.id !== 'abandoned_chest' || found.object !== 'chest') errors.push(`the planted event is shown as ${JSON.stringify(found)}`);
+    await walkTo('event', 2.6);
+    await promptShot('E: look at the abandoned chest', 'prompt-event');
+    stood = await page.evaluate(() => window.__aiv.player);
+    await Promise.all([page.waitForURL(onPath('/game/event'), { timeout: 30000 }), page.keyboard.press('KeyE')]);
+    await page.waitForSelector('form[action="/game/event/choose"]', { timeout: 10000 });
+    await shot('classic-event');
+    await page.locator('form[action="/game/event/choose"] button').first().click();
+    await page.waitForSelector('form[action="/game/event/continue"]', { timeout: 10000 });
+    await page.locator('form[action="/game/event/continue"] button').first().click();
+    await page.waitForURL((u) => u.pathname === '/' || onPath('/battle')(u), { timeout: 30000 });
+    if (onPath('/battle')(new URL(page.url()))) {
+      // The outcome started a fight: it is fought first.
+      await winBattle();
+      await page.click('#back-link');
+    }
+    await backInWorld(stood, 'content-event-gone');
+    if (await page.evaluate(() => window.__aiv.contents?.event !== null)) errors.push('the event is still in the area after it was answered');
+    await worldShot('content-event-gone');
+
+    // Nothing is left here (a fight from the event came from another roll), so the search spot answers.
+    const before = await page.evaluate(() => window.__aiv.contents.seq);
+    await walkTo('search', 1.5);
+    await promptShot('E: search further', 'prompt-search');
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction((n) => window.__aiv.contents?.seq === n + 1, before, { timeout: 30000 })
+      .catch(() => errors.push('after-search: the contents were not rolled again'));
+    await page.waitForTimeout(300);
+    await worldShot('after-search');
+  } else {
+    console.log(`skipped without --serve (nothing can be planted): ${encounters.join(', ')}`);
+  }
+
+  // 14. The arena of the first boss, and the boss in it. The fight is not started.
   await moveAndEnter('grove');
   await landmarkShot('boss', 'area-boss');
+  await slotShot('boss', 'content-boss');
+  const guardian = await page.evaluate(() => window.__aiv.contents?.boss ?? null);
+  if (guardian?.id !== 'Shard Guardian') errors.push(`the boss of the grove is shown as ${JSON.stringify(guardian)}`);
+  await walkTo('boss', 2.6);
+  await promptShot('E: challenge The Shard Guardian', 'prompt-boss');
+  if (await page.evaluate(() => window.__aiv.interaction?.auto !== false)) errors.push('the boss would start the fight without a key press');
+
+  // 15. The rest of Act 1.
+  if (serve) defeatEveryBoss();
   await travelAndEnter('Abandoned Watchtower', 'loc-abandoned-watchtower');
 
-  // 13. Acts 2 and 3, which a new character reaches only with every boss defeated.
+  // 16. Acts 2 and 3, which a new character reaches only with every boss defeated.
   const later = [
     ['Emberforge Mountains', 'loc-emberforge-mountains'],
     ['Sunken Temple of Dariel', 'loc-sunken-temple'],
@@ -359,7 +562,7 @@ try {
   if (serve) for (const [locationName, name] of later) await travelAndEnter(locationName, name);
   else console.log(`skipped without --serve (Acts 2 and 3 are locked): ${later.map(([, name]) => name).join(', ')}`);
 
-  // 14. A model that does not load: a fresh page in the town square, with the request for the well refused.
+  // 17. A model that does not load: a fresh page in the town square, with the request for the well refused.
   // That one failed request and its console message are let through; a box stands in for the well.
   await post('/game/travel', [['location_name', 'Rivermeet Town']]);
   await page.close();

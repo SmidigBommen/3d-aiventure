@@ -104,9 +104,9 @@
         <a href="/game/ending" class="btn btn-primary">Witness the Ending</a>
         {% elif rewards and rewards.boss and rewards.boss.act_unlocked %}
         <a href="/game/travel" class="btn btn-primary">Travel Onward</a>
-        <a href="/game" class="btn btn-secondary">Stay Here</a>
+        <a href="{{ back_url }}" id="back-link" class="btn btn-secondary">Stay Here</a>
         {% else %}
-        <a href="/game" class="btn btn-primary">Continue Adventure</a>
+        <a href="{{ back_url }}" id="back-link" class="btn btn-primary">Continue Adventure</a>
         {% endif %}
     </div>
 </div>

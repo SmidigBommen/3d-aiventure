@@ -31,6 +31,9 @@ h2 { font-size: 1.6rem; margin-bottom: 1rem; }
 #hud-description { margin: 0.5rem 0 0; font-size: 0.9rem; font-style: italic; line-height: 1.35; opacity: 0.9; max-height: 12rem; overflow: hidden; transition: opacity 1.2s, max-height 1.2s, margin 1.2s; }
 #hud-description.faded { opacity: 0; max-height: 0; margin-top: 0; }
 #hud-character { bottom: 1rem; left: 1rem; }
+#prompt, #notice { position: absolute; left: 50%; transform: translateX(-50%); padding: 0.5rem 1.2rem; border-radius: 8px; background: rgba(11, 10, 16, 0.72); white-space: nowrap; }
+#prompt { bottom: 22%; border: 1px solid rgba(212, 169, 74, 0.6); font-family: var(--heading); font-size: 1.15rem; letter-spacing: 0.04em; color: var(--gold); }
+#notice { bottom: 31%; border: 1px solid rgba(212, 169, 74, 0.25); font-style: italic; }
 #hud-keys { bottom: 1rem; right: 1rem; font-size: 0.85rem; opacity: 0.85; }
 
 /* Danger bands, coloured as on the classic area map */
