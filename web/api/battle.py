@@ -35,10 +35,28 @@ def _answer(session, fled: bool = False) -> dict:
     return {"battle": fight.battle_view(session, fled), "state": world.world_state(session)}
 
 
+def _strict_object(pairs):
+    """A JSON object as a dict; a key given twice is not a body this API reads."""
+    made = dict(pairs)
+    if len(made) != len(pairs):
+        raise ValueError("duplicate key")
+    return made
+
+
+def _not_json(constant):
+    raise ValueError(f"{constant} is not JSON")
+
+
 async def _body(request: Request):
-    """The request body when it is a JSON object, else None."""
+    """The request body: {} when there is none, the JSON object when it is one, else None.
+
+    Strict JSON: NaN, Infinity and repeated keys are refused, as is anything that is not UTF-8.
+    """
+    raw = await request.body()
+    if not raw.strip():
+        return {}
     try:
-        body = json.loads(await request.body())
+        body = json.loads(raw.decode("utf-8"), object_pairs_hook=_strict_object, parse_constant=_not_json)
     except ValueError:
         return None
     return body if isinstance(body, dict) else None
@@ -47,16 +65,20 @@ async def _body(request: Request):
 async def _act(request: Request, action, field: str = None, kind: type = None):
     """One battle action: refused with nothing written, or carried out and saved.
 
-    `field` names the value the action takes from the body, `kind` its type.
+    `field` names the value the action takes from the body, `kind` its type. An action that takes
+    nothing is still refused when it comes with a body that is not a JSON object.
     """
     session = get_session(request)
     if not session.character:
         return _refuse(*NO_CHARACTER)
     try:
         fight.check_turn(session)
+        body = await _body(request)
+        if body is None:
+            return _refuse(*BAD_REQUEST)
         args = ()
         if field:
-            value = (await _body(request) or {}).get(field)
+            value = body.get(field)
             # A boolean is an int in Python, and no index.
             if not isinstance(value, kind) or isinstance(value, bool):
                 return _refuse(*BAD_REQUEST)
@@ -108,6 +130,8 @@ async def carry_on(request: Request):
     session = get_session(request)
     if not session.character:
         return _refuse(*NO_CHARACTER)
+    if await _body(request) is None:
+        return _refuse(*BAD_REQUEST)
     if fight.battle_view(session)["phase"] != "victory":
         return _refuse(409, "nothing_to_continue", "There is no victory to carry on from.")
     session.battle_rewards = None
@@ -121,6 +145,8 @@ async def revive(request: Request):
     session = get_session(request)
     if not session.character:
         return _refuse(*NO_CHARACTER)
+    if await _body(request) is None:
+        return _refuse(*BAD_REQUEST)
     try:
         fight.revive(session)
     except fight.Rejected as rejection:

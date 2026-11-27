@@ -203,7 +203,9 @@ tools/                           balance simulator, sprite drawing, classic scre
 - **API** (`web/api/battle.py`, under `/api/battle`): `GET` (the view; writes and rolls nothing),
   `POST attack`, `defend`, `ability` (`{"ability_id"}`), `item` (`{"item_index"}`), `flee`,
   `continue` (after a victory: clears `battle_rewards`) and `revive`. Every answer is
-  `{"battle", "state"}`. A refusal leaves the session file untouched.
+  `{"battle", "state"}`. A refusal leaves the session file untouched. Bodies are read as strict
+  JSON (no NaN, no repeated keys, UTF-8 only); a body that is not a JSON object is `bad_request` on
+  every POST, also on the ones that take nothing.
 - **Battle view** (`fight.battle_view(session, fled)`): `phase` (`fight`, `victory`, `defeat`,
   `fled`, `none`), `round`, `player_turn`, `turn` (`seq`, `events`), `player`, `monster`,
   `abilities` (with `summary`, `usable`, `hotkey`), `items` (stacks with `index`, `count`,

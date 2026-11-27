@@ -256,6 +256,22 @@ class TestRejections:
         self.check(client, "/api/battle/continue", None, 409, "nothing_to_continue")
         self.check(client, "/api/battle/revive", None, 409, "not_defeated")
 
+    def test_strict_bodies(self, client, monkeypatch):
+        start(client, monkeypatch, max_hit_points=500, current_hit_points=500)
+        raw_bodies = [b"{", b"not json", b"[]", b"7", b'"power_strike"', b"null", b"\xff\xfe",
+                      b'{"ability_id": 5, "ability_id": "power_strike"}', b'{"ability_id": "power_strike", "x": NaN}',
+                      b"ability_id=power_strike", b"{'ability_id': 'power_strike'}"]
+        for action in ("ability", "item", "attack", "defend", "flee", "continue", "revive"):
+            for body in raw_bodies:
+                before = raw(client)
+                refused(client.post(f"/api/battle/{action}", content=body, headers={"content-type": "application/json"}),
+                        400, "bad_request")
+                assert raw(client) == before, (action, body)
+        # An action that takes nothing accepts no body, blank space or an object.
+        for kwargs in ({}, {"content": b"  "}, {"json": {}}, {"json": {"anything": 1}}):
+            edit(client, lambda d: d["battle"]["monster"].update(hp=9999, max_hp=9999))
+            assert client.post("/api/battle/defend", **kwargs).status_code == 200
+
     def test_no_fight(self, client):
         place(client)
         for action, body in (("attack", None), ("defend", None), ("flee", None),
