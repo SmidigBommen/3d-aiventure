@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SPECIAL_LANDMARKS, dressArea, dressSpecOf, moodFor, type DressSpec, type Dressing, type Placement } from './dressing';
+import { SIGN_HEIGHT, SPECIAL_LANDMARKS, dressArea, dressSpecOf, moodFor, type DressSpec, type Dressing, type Placement } from './dressing';
 import { buildLayout, type AreaLayout, type Box } from './layout';
 import {
   MANIFEST, campaignDressSpecs, exitStrip, footprintOf, madeUpSpecs, overlap, rectDistance, scaledSize, signature, spawnSquare, triggerZone, walkerWins,
@@ -289,6 +289,20 @@ describe('dressArea', () => {
         expect(1 - shared / Math.max(A.size, B.size), `${name(a)} and ${name(b)}`).toBeGreaterThanOrEqual(0.6);
       }
     }
+  });
+
+  it('leaves room for the sign between a dungeon\'s gateway and its ceiling, down to the lowest ceiling', () => {
+    const ceilings = new Set<number>();
+    for (const d of ALL) {
+      if (d.layout.ceiling === null) continue;
+      ceilings.add(d.layout.ceiling);
+      for (const p of d.dressing.placements.filter((q) => q.role === 'gate')) {
+        const top = p.y + scaledSize(p).H;
+        expect(top + SIGN_HEIGHT + 0.02, name(d)).toBeLessThanOrEqual(d.layout.ceiling - 0.02);
+        expect(top, name(d)).toBeGreaterThanOrEqual(2.5);
+      }
+    }
+    expect(Math.min(...ceilings)).toBe(3.5);
   });
 
   it('opens every gateway as wide as its gate', () => {

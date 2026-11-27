@@ -438,6 +438,8 @@ const FOOTPRINT_GAP = 0.1; // m between two footprints (a canopy does not grow i
 const ZONE_GAP = 0.3; // m between a footprint and a trigger zone
 const SPAWN_GAP = 1.5; // m between a footprint and a spawn point
 const GATE_HEIGHT = 3.3; // m, the gateway; its opening is then 2.7 m high in the middle
+export const SIGN_HEIGHT = 0.9; // m, the destination sign that the renderer puts above a gateway
+export const SIGN_ROOM = SIGN_HEIGHT + 0.05; // m a dungeon's gateway stays under the ceiling, so that the sign fits above it
 const GROUND_TOP = 0.06; // m above the floor plane: where the top of a paving tile lies
 const ARRIVAL = 5; // m kept open in front of a gate's spawn point
 const GRID = 0.25;
@@ -760,7 +762,7 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   for (const gate of layout.gates) {
     const [, h, d] = modelSize(theme.gate.model);
     const n = INWARD[gate.side];
-    const height = ceiling === null ? GATE_HEIGHT : Math.min(GATE_HEIGHT, ceiling - 0.05);
+    const height = ceiling === null ? GATE_HEIGHT : Math.min(GATE_HEIGHT, ceiling - SIGN_ROOM);
     const back = d / 2 - 0.05;
     placements.push({
       model: theme.gate.model, role: 'gate', landmark: null, gate: gate.exitId,

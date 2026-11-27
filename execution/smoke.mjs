@@ -268,9 +268,27 @@ try {
     window.__aiv.lookAt(g.x, g.z);
     return g;
   });
+  // The next area (the tavern) needs a model the square has not loaded; it is held back, so that the
+  // state on the way from gate to gate can be looked at: loading, and no player or layout to report.
+  let letGo;
+  const kept = new Promise((done) => (letGo = done));
+  await page.route('**/models/**', async (route) => {
+    await kept;
+    await route.continue();
+  });
   await page.keyboard.down('KeyW');
+  await page.waitForFunction(() => window.__aiv.loading === true, null, { timeout: 60000 });
+  const between = await page.evaluate(() => ({
+    screen: window.__aiv.screen, player: window.__aiv.player, layout: window.__aiv.layout, dressing: window.__aiv.dressing,
+    indicator: !document.getElementById('loading').hidden,
+  }));
+  if (between.player !== null || between.layout !== null || between.dressing !== null || between.screen !== 'world' || !between.indicator) {
+    errors.push(`between two areas: ${JSON.stringify(between).slice(0, 300)}`);
+  }
+  letGo();
   await page.waitForFunction((id) => window.__aiv.state.area.id === id && window.__aiv.screen === 'world' && !window.__aiv.loading, gate.exitId, { timeout: 60000 });
   await page.keyboard.up('KeyW');
+  await page.unroute('**/models/**');
   const served = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
   if (served.area.id !== gate.exitId) errors.push(`walked to ${gate.exitId} but the server says ${served.area.id}`);
   const shownArea = await page.textContent('#hud-area');

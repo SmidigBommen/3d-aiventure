@@ -62,20 +62,24 @@ const turn = (dYaw: number, dPitch: number): void => {
   view = turnView(view, dYaw, dPitch);
 };
 
+// What the page reports of the area: nothing while one is loading, also on the way from gate to gate,
+// when the area left behind is still under the veil.
+const shown = (): boolean => inWorld() && !loading;
+
 window.__aiv = {
   ready: false,
   frames: 0,
   get screen() { return screen; },
   get state() { return state; },
-  get player() { return inWorld() ? { x: player.x, z: player.z, yaw: view.yaw } : null; },
-  get layout() { return inWorld() ? layout : null; },
+  get player() { return shown() ? { x: player.x, z: player.z, yaw: view.yaw } : null; },
+  get layout() { return shown() ? layout : null; },
   get menuOpen() { return menuOpen; },
   get loading() { return loading; },
   get modelErrors() { return modelErrors(); },
-  get dressing() { return inWorld() ? dressing : null; },
+  get dressing() { return shown() ? dressing : null; },
   get triangles() { return triangles; },
   lookAt(x, z) {
-    if (!inWorld()) return;
+    if (!shown()) return;
     const t = turnTowards(view, player, { x, z });
     turn(t.dYaw, t.dPitch);
   },

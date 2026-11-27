@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { footprint, type Dressing, type Placement } from './dressing';
+import { SIGN_HEIGHT, footprint, type Dressing, type Placement } from './dressing';
 import { INWARD, boundaryBlocks, type AreaLayout, type Gate, type Side } from './layout';
 import type { Model } from './modelLoader';
 
@@ -11,7 +11,6 @@ const GOLD = '#d4a94a';
 const INK = '#e8dcc4';
 const DARK = '#0b0a10';
 const FALLBACK = '#6a6672'; // a model that failed to load is a box of this colour, or of its tint
-const SIGN_HEIGHT = 0.9;
 const SIGN_OVERHANG = 0.5; // m the sign reaches past the opening on each side
 const BACKING = 1.2; // m, thickness of the plain wall behind a dungeon's wall models
 const MAX_FLAMES = 6;
@@ -76,8 +75,7 @@ function facing(side: Side): number {
 }
 
 /**
- * The sign of a gate, above its gateway (`top` is the gateway's height) or as high as the ceiling
- * lets it, and what is plain around it: the board the sign hangs on, in a dungeon the wall up to
+ * The sign of a gate, above its gateway (`top` is the gateway's height), and what is plain around it: the board the sign hangs on, in a dungeon the wall up to
  * the ceiling and a dark passage behind the opening, outdoors the path that leads on.
  */
 function buildGate(gate: Gate, name: string, layout: AreaLayout, top: number, stone: THREE.Material, path: THREE.Material): THREE.Group {
@@ -107,8 +105,8 @@ function buildGate(gate: Gate, name: string, layout: AreaLayout, top: number, st
     new THREE.PlaneGeometry(board, SIGN_HEIGHT),
     new THREE.MeshBasicMaterial({ map: signTexture(name), fog: false }),
   );
-  // Above the gateway; under a low ceiling there is no room there, and it hangs across the top of the arch.
-  const bottom = layout.ceiling !== null ? Math.min(top + 0.02, layout.ceiling - SIGN_HEIGHT - 0.02) : top + 0.1;
+  // Above the gateway. In a dungeon the dressing keeps the gateway SIGN_ROOM under the ceiling, so the sign fits.
+  const bottom = top + (layout.ceiling !== null ? 0.02 : 0.1);
   sign.position.set(0, bottom + SIGN_HEIGHT / 2, 0.12);
   group.add(sign);
   return group;
