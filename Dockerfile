@@ -5,6 +5,8 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY tsconfig.json vite.config.ts vitest.config.ts ./
 COPY client ./client
+# Client code and its tests import game data, and the build type-checks them.
+COPY json ./json
 RUN pnpm build
 
 FROM python:3.13-slim
