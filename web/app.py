@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -58,12 +58,30 @@ app.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
 app.include_router(saves.router, prefix="/saves", tags=["saves"])
 
 
-# The 3D client (built by `pnpm build` into client/dist) is served at /. It is mounted last,
-# so every route above wins. Without a build, / leads to the classic interface.
+# The 3D client (built by `pnpm build` into client/dist) is served at /. Each of its top-level
+# entries gets a route of its own; one catch-all mount at / would swallow the redirect from
+# /battle to /battle/ that the classic routes rely on. Without a build, / leads to /classic.
 CLIENT_DIST = web_dir.parent / "client" / "dist"
-if CLIENT_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=CLIENT_DIST, html=True), name="client")
+
+
+def _mount_client(dist: Path) -> None:
+    def serve(path: Path):
+        async def send_file():
+            return FileResponse(path)
+        return send_file
+
+    for entry in sorted(dist.iterdir()):
+        if entry.is_dir():
+            app.mount(f"/{entry.name}", StaticFiles(directory=entry), name=f"client-{entry.name}")
+        elif entry.name == "index.html":
+            app.add_api_route("/", serve(entry), methods=["GET"], include_in_schema=False)
+        else:
+            app.add_api_route(f"/{entry.name}", serve(entry), methods=["GET"], include_in_schema=False)
+
+
+if (CLIENT_DIST / "index.html").is_file():
+    _mount_client(CLIENT_DIST)
 else:
-    @app.get("/")
+    @app.get("/", include_in_schema=False)
     async def no_client():
         return RedirectResponse("/classic")
