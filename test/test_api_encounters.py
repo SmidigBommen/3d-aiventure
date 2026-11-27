@@ -20,6 +20,7 @@ from web import world
 
 CAMPAIGN = game_session.get_campaign()
 EVENTS = game_session.get_events()
+BOSSES = game_session.get_bosses()
 ALL_AREAS = [
     (act["number"], loc, area)
     for act in CAMPAIGN["acts"] for loc in act["locations"] for area in loc["areas"]
@@ -172,7 +173,7 @@ class TestState:
         assert _path(client).read_bytes() == before
 
         contents = client.post("/api/enter").json()["contents"]
-        assert set(contents) == {"seq", "monster", "event", "boss", "search_spot"}
+        assert set(contents) == {"seq", "monster", "event", "spent", "boss", "search_spot"}
         assert contents["seq"] == 1 and contents["boss"] is None
         assert not (contents["monster"] and contents["event"])
         saved = _path(client).read_bytes()
@@ -190,7 +191,7 @@ class TestState:
         place(client, where, planted(where, event="mossy_shrine"))
         assert client.get("/api/state").json()["contents"]["event"] == {
             "id": "mossy_shrine", "title": EVENTS["mossy_shrine"]["title"],
-            "object": "shrine", "label": "the old shrine"}
+            "object": "shrine", "label": "the old shrine", "landmark": False}
 
     def test_stale_contents_are_not_shown_and_entering_rolls(self, client):
         place(client, "Whispering Woods/entrance", planted("Whispering Woods/clearing", monster=GOBLIN))
@@ -309,7 +310,8 @@ class TestOneTimeEvents:
 class TestBoss:
     def test_shown_whatever_the_roll(self, client, monkeypatch):
         where = "Whispering Woods/grove"
-        guardian = {"id": "Shard Guardian", "name": "The Shard Guardian", "level": 5,
+        guardian = {"title": BOSSES["Shard Guardian"]["title"], "intro": BOSSES["Shard Guardian"]["intro"],
+                    "id": "Shard Guardian", "name": "The Shard Guardian", "level": 5,
                     "locked": False, "locked_text": None}
         for kind in ("monster", "event", "nothing"):
             with monkeypatch.context() as m:
@@ -405,7 +407,7 @@ class TestClassicExplore:
         area = next(a for _, loc, a in ALL_AREAS if loc["name"] == "Whispering Woods" and a["id"] == "clearing")
         assert stored["battle"]["monster"]["race"] in area["monster_types"]
         assert stored["battle"]["monster"]["name"] != "Grak"
-        assert stored["area_contents"] == planted(where, seq=5)
+        assert stored["area_contents"] == {**planted(where, seq=5), "spent": None}
         assert stored["pending_event"] is None
 
     def test_event_and_nothing(self, client, monkeypatch):
@@ -415,11 +417,11 @@ class TestClassicExplore:
             place(client, where)
             assert client.post("/game/explore", follow_redirects=False).headers["location"] == "/game/event"
             stored = load(client)
-            assert stored["pending_event"] and stored["area_contents"] == planted(where, seq=1)
+            assert stored["pending_event"] and stored["area_contents"] == {**planted(where, seq=1), "spent": None}
         force(monkeypatch, "nothing")
         place(client, where)
         assert client.post("/game/explore", follow_redirects=False).headers["location"] == "/game?explored=true"
-        assert load(client)["area_contents"] == planted(where, seq=1)
+        assert load(client)["area_contents"] == {**planted(where, seq=1), "spent": None}
 
     def test_rolls_nothing_during_a_battle(self, client):
         where = "Whispering Woods/clearing"

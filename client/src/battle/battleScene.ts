@@ -16,6 +16,7 @@ const FX_SECONDS = 0.6;
 const FLIGHT_SECONDS = 0.15;
 const SINK_DEPTH = 1.5; // m
 const FALLEN_EYE = 0.4; // m above the floor
+const RAGE_GLOW = 0.3; // how strongly an enraged boss glows in its rage colour, at the middle of its pulse
 
 export interface EyeOffset { forward: number; side: number; up: number; roll: number }
 
@@ -28,10 +29,14 @@ export interface BattleScene {
   update: (dt: number) => void;
   /** How far what plays now moves the player's eye from the battle stance. */
   eye: () => EyeOffset;
+  /** The look of a boss in its rage (boss.ts), or back to none: larger by `factor`, glowing, pulsing in size. */
+  setEnraged: (rage: Rage | null) => void;
   /** A point above the monster's head, for what floats there. */
   head: () => THREE.Vector3;
   dispose: () => void;
 }
+
+export interface Rage { factor: number; emissive: string; pulse: number; period: number }
 
 type MoveKind = Motion | 'dodge';
 interface Move { kind: MoveKind; t: number; d: number }
@@ -165,6 +170,8 @@ export function buildBattleScene(look: Look, figure: Figure | null, slot: Vec2, 
   let sunk = false;
   let eyeMove: { anim: Anim; t: number; d: number } | null = null;
   let fallen = false; // the player lies on the ground
+  let rage: (Rage & { t: number }) | null = null;
+  const calm = standing.materials.map((material) => ({ emissive: material.emissive?.clone() ?? null, intensity: material.emissiveIntensity }));
 
   const once = (part: 'attack' | 'hurt' | 'death', seconds: number): void => {
     const action = actions[part];
@@ -281,8 +288,29 @@ export function buildBattleScene(look: Look, figure: Figure | null, slot: Vec2, 
         setSunk(1);
       }
     },
+    setEnraged(next) {
+      if (next && rage && next.factor === rage.factor && next.emissive === rage.emissive) return;
+      rage = next ? { ...next, t: 0 } : null;
+      standing.root.scale.setScalar(next ? next.factor : 1);
+      standing.materials.forEach((material, i) => {
+        if (!material.emissive) return;
+        if (next) {
+          material.emissive.set(next.emissive);
+          material.emissiveIntensity = RAGE_GLOW;
+        } else {
+          material.emissive.copy(calm[i].emissive ?? material.emissive);
+          material.emissiveIntensity = calm[i].intensity;
+        }
+      });
+    },
     update(dt) {
       mixer?.update(dt);
+      if (rage) {
+        rage.t += dt;
+        const swell = Math.sin((rage.t / rage.period) * Math.PI * 2);
+        standing.root.scale.setScalar(rage.factor * (1 + rage.pulse * swell));
+        for (const material of standing.materials) if (material.emissive) material.emissiveIntensity = RAGE_GLOW * (1 + 0.5 * swell);
+      }
       if (move) {
         move.t += dt;
         const p = Math.min(move.t / move.d, 1);
@@ -345,7 +373,7 @@ export function buildBattleScene(look: Look, figure: Figure | null, slot: Vec2, 
       }
     },
     head() {
-      return new THREE.Vector3(slot.x, sunk ? 0.5 : height + 0.25, slot.z);
+      return new THREE.Vector3(slot.x, sunk ? 0.5 : height * (rage?.factor ?? 1) + 0.25, slot.z);
     },
     dispose() {
       mixer?.stopAllAction();

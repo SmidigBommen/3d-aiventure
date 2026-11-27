@@ -129,7 +129,7 @@ class TestView:
         assert set(view["turn"]) == {"seq", "events"}
         assert set(view["player"]) == {"name", "level", "hp", "max_hp", "pp", "max_pp", "ac", "effects"}
         assert set(view["monster"]) == {"name", "race", "level", "hp", "max_hp", "ac", "is_boss", "boss_id",
-                                        "title", "enraged", "effects"}
+                                        "title", "enraged", "effects", "taunt", "enrage_text", "place"}
         assert view["monster"]["boss_id"] is None and view["monster"]["is_boss"] is False
         assert set(view["flee"]) == {"dc", "modifier"} and view["flee"]["dc"] == 10
         assert view["can_flee"] is True and view["rewards"] is None and view["defeat"] is None

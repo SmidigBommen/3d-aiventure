@@ -130,6 +130,7 @@ def roll_contents(session: GameSession):
         "seq": int(previous.get("seq", 0)) + 1,
         "monster": {"id": uuid.uuid4().hex, **rolled["monster"]} if rolled["monster"] else None,
         "event": {"id": rolled["event"]} if rolled["event"] else None,
+        "spent": None,
     }
     return session.area_contents
 
@@ -166,7 +167,25 @@ def area_boss(session: GameSession):
         "level": boss["level"],
         "locked": locked,
         "locked_text": boss.get("locked_text", DEFAULT_LOCKED_TEXT) if locked else None,
+        "title": boss.get("title", ""),
+        "intro": boss.get("intro"),
     }
+
+
+def event_look(event_id: str) -> dict:
+    """An event as the client places and names it. A discovery (an event with `special`) is met at the landmark."""
+    definition = get_events().get(event_id, {})
+    title = definition.get("title", event_id)
+    look = get_event_objects().get(event_id, {"object": "chest", "label": title})
+    return {"id": event_id, "title": title, "object": look["object"], "label": look["label"],
+            "landmark": bool(definition.get("special"))}
+
+
+def mark_spent(session: GameSession, event_id: str) -> None:
+    """Remember the event resolved in the current area until its contents are rolled again."""
+    contents = stored_contents(session)
+    if contents is not None:
+        contents["spent"] = {"id": event_id}
 
 
 def contents_view(session: GameSession):
@@ -176,16 +195,13 @@ def contents_view(session: GameSession):
         return None
     monster = contents.get("monster")
     event = contents.get("event")
-    if event:
-        definition = get_events().get(event["id"], {})
-        title = definition.get("title", event["id"])
-        look = get_event_objects().get(event["id"], {"object": "chest", "label": title})
-        event = {"id": event["id"], "title": title, "object": look["object"], "label": look["label"]}
+    spent = contents.get("spent")
     location = session.current_location
     return {
         "seq": contents.get("seq", 1),
         "monster": {key: monster[key] for key in ("id", "race", "name", "level")} if monster else None,
-        "event": event,
+        "event": event_look(event["id"]) if event else None,
+        "spent": event_look(spent["id"]) if spent else None,
         "boss": area_boss(session),
         "search_spot": has_search_spot(session.current_area, location.get("type"), session.completed_events),
     }

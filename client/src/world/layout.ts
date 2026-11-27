@@ -41,12 +41,13 @@ export interface Gate {
   width: number;
   spawn: Vec2;
 }
-/** Where what an area holds stands: the monster, the event object, the search spot and the boss. */
+/** Where what an area holds stands: the monster, the event object, the search spot, the boss, and where one stands at the special landmark. */
 export interface ContentSlots {
   monster: Vec2;
   event: Vec2;
   search: Vec2;
   boss: Vec2 | null; // non-null exactly when the DressSpec has boss: true
+  landmark: Vec2 | null; // a standing point in front of the special landmark; non-null exactly when the dressing has one
 }
 export interface AreaLayout {
   type: LocationType;

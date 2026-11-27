@@ -1,20 +1,25 @@
 import * as THREE from 'three';
 import {
-  BOSS_SCALE, SEARCH_MARKERS, creatureLook, objectLook, type AreaContents, type CreatureLook,
+  BOSS_SCALE, SEARCH_MARKERS, creatureLook, objectLook, remainsOf, type AreaContents, type CreatureLook,
 } from './contents';
-import { modelSize } from './dressing';
+import { footprint, modelSize, type Placement } from './dressing';
 import type { AreaLayout } from './layout';
 import type { Figure } from './modelLoader';
 
 // Draws what an area holds on the slots of its layout: the monster, the event object, the boss and
 // the search spot, each with its name above it. Which model shows what is decided in contents.ts;
-// what is present is decided by the server. Rebuilt whenever the contents change.
+// what is present is decided by the server. A discovery has no object of its own: the special
+// landmark of the area (drawn by areaScene.ts) glows instead. What stays of a resolved event stands
+// where it stood, without glow, light or name. Rebuilt whenever the contents change.
 
 const GOLD = '#daa520'; // the gold of the classic headings
 const INK = '#e8dcc4';
 const FALLBACK = '#6a6672'; // a model that failed to load is a box of this colour, or of its tint
 const LABEL_WIDTH = 2; // m
 const CEILING_ROOM = 0.2; // m a boss stays under a dungeon's ceiling
+const SPENT_SHADE = 0.45; // what stays of a resolved event is this much darker
+const LID_OPEN = -1.25; // rad about the hinge of a chest's lid
+const OPENED = ['chest', 'treasure']; // object kinds that are drawn opened once resolved
 
 export interface ContentScene {
   group: THREE.Group;
@@ -23,12 +28,17 @@ export interface ContentScene {
   dispose: () => void;
 }
 
-/** The models a content scene for these contents is drawn from. */
-export function contentModels(layout: AreaLayout, contents: AreaContents | null): string[] {
+/** Whether what stays of this resolved event is drawn on the event slot. */
+const staysOnSlot = (spent: AreaContents['spent']): boolean => Boolean(spent) && !spent?.landmark && remainsOf(spent?.object ?? '') === 'stays';
+
+/** The models a content scene for these contents is drawn from. `landmark`: the special landmark of the dressing. */
+export function contentModels(layout: AreaLayout, contents: AreaContents | null, landmark: Placement | null = null): string[] {
   if (!contents) return [];
   const keys: string[] = [];
   if (contents.monster) keys.push(creatureLook(contents.monster.race).model);
-  if (contents.event) keys.push(objectLook(contents.event.object).model);
+  if (contents.event && !contents.event.landmark) keys.push(objectLook(contents.event.object).model);
+  if (contents.event?.landmark && landmark) keys.push(landmark.model);
+  if (contents.spent && staysOnSlot(contents.spent)) keys.push(objectLook(contents.spent.object).model);
   if (contents.boss) keys.push(creatureLook(contents.boss.id).model);
   if (contents.search_spot) keys.push(SEARCH_MARKERS[layout.type].model);
   return keys;
@@ -84,10 +94,14 @@ export interface Standing {
   dispose: () => void;
 }
 
+/** `scale` for a model, or the largest that keeps it under a dungeon's ceiling. */
+export function underCeiling(layout: AreaLayout, model: string, scale: number): number {
+  return layout.ceiling === null ? scale : Math.min(scale, (layout.ceiling - CEILING_ROOM) / modelSize(model)[1]);
+}
+
 /** The scale a boss is drawn at: its own times BOSS_SCALE, kept under a dungeon's ceiling. */
 export function bossScale(layout: AreaLayout, look: CreatureLook): number {
-  const height = modelSize(look.model)[1];
-  return layout.ceiling === null ? look.scale * BOSS_SCALE : Math.min(look.scale * BOSS_SCALE, (layout.ceiling - CEILING_ROOM) / height);
+  return underCeiling(layout, look.model, look.scale * BOSS_SCALE);
 }
 
 /**
@@ -149,7 +163,9 @@ export function standModel(look: Look, figure: Figure | null): Standing {
   return { root, body, top, materials, clips: figure.clips, dispose };
 }
 
-export function buildContentScene(layout: AreaLayout, contents: AreaContents | null, figures: Map<string, Figure | null>): ContentScene {
+export function buildContentScene(
+  layout: AreaLayout, contents: AreaContents | null, figures: Map<string, Figure | null>, landmark: Placement | null = null,
+): ContentScene {
   const group = new THREE.Group();
   const owned: { dispose: () => void }[] = []; // made here; what belongs to the loader stays
   const own = <T extends { dispose: () => void }>(thing: T): T => {
@@ -160,6 +176,7 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
   const facing: THREE.Object3D[] = []; // turned to the player every frame
   const pulsing: THREE.MeshStandardMaterial[] = [];
   let glow: THREE.PointLight | null = null;
+  let shell: THREE.MeshBasicMaterial | null = null; // the gold over a landmark that holds a discovery
   const slots = layout.slots;
 
   /** A model standing at (x, z); a figure with clips plays its idle. */
@@ -177,8 +194,13 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
     return standing;
   };
 
-  const name = (lines: string[], x: number, z: number, top: number): void => {
+  /** A name plate above (x, z). `through`: it shows through what stands in front of it (a landmark one stands beside). */
+  const name = (lines: string[], x: number, z: number, top: number, through = false): void => {
     const sprite = label(lines);
+    if (through) {
+      sprite.material.depthTest = false;
+      sprite.renderOrder = 10;
+    }
     own(sprite.material);
     own(sprite.material.map as THREE.Texture);
     const half = sprite.scale.y / 2;
@@ -200,7 +222,40 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
       facing.push(root);
       name([contents.boss.name], slots.boss.x, slots.boss.z, layout.ceiling === null ? top : Math.min(top, layout.ceiling - CEILING_ROOM));
     }
-    if (contents.event) {
+    if (contents.event?.landmark && landmark) {
+      // A discovery: the landmark itself glows. A gold shell of the same model lies over the one areaScene drew.
+      const figure = figures.get(landmark.model) ?? null;
+      const size = footprint(landmark.model, landmark.scale, landmark.rotation);
+      const shellMaterial = own(new THREE.MeshBasicMaterial({
+        color: GOLD, transparent: true, opacity: 0.2, blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      }));
+      shell = shellMaterial;
+      const holder = new THREE.Group();
+      holder.position.set(landmark.x, landmark.y, landmark.z);
+      holder.rotation.y = landmark.rotation;
+      holder.scale.set(...landmark.scale);
+      if (figure) {
+        // Placed as areaScene places it: bounding box centred, lowest point on the floor.
+        const body = figure.instance();
+        body.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(body, true);
+        const centre = box.getCenter(new THREE.Vector3());
+        body.position.set(-centre.x, -box.min.y, -centre.z);
+        body.traverse((object) => {
+          const mesh = object as THREE.Mesh;
+          if (mesh.isMesh) mesh.material = shellMaterial;
+        });
+        holder.add(body);
+      }
+      group.add(holder);
+      glow = new THREE.PointLight(GOLD, 6, 9, 1.8);
+      const lightAt = slots.landmark ?? { x: landmark.x, z: landmark.z };
+      // Between the landmark and where one stands at it, so that its front is lit.
+      glow.position.set((landmark.x + lightAt.x) / 2, Math.min(Math.max(size.height, 0.6) + 0.5, 2.6), (landmark.z + lightAt.z) / 2);
+      group.add(glow);
+      name([contents.event.title], landmark.x, landmark.z, Math.max(size.height, 0.9), true);
+    } else if (contents.event) {
       const look = objectLook(contents.event.object);
       const scale = look.height / modelSize(look.model)[1];
       const { root, top, materials } = stand({ model: look.model, scale, tint: look.tint, opacity: 1, emissive: null }, slots.event.x, slots.event.z);
@@ -215,6 +270,24 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
       glow.position.set(slots.event.x, Math.max(top, 0.6) + 0.5, slots.event.z);
       group.add(glow);
       name([contents.event.title], slots.event.x, slots.event.z, Math.max(top, 0.9));
+    }
+    if (contents.spent && staysOnSlot(contents.spent) && !(contents.event && !contents.event.landmark)) {
+      // What is left of a resolved event: where it stood, darker, a chest with its lid up.
+      const look = objectLook(contents.spent.object);
+      const scale = look.height / modelSize(look.model)[1];
+      const standing = own(standModel({ model: look.model, scale, tint: look.tint, opacity: 1, emissive: null }, figures.get(look.model) ?? null));
+      standing.root.position.set(slots.event.x, 0, slots.event.z);
+      standing.root.rotation.y = Math.atan2(layout.spawn.x - slots.event.x, layout.spawn.z - slots.event.z);
+      group.add(standing.root);
+      let opened = false;
+      if (OPENED.includes(contents.spent.object)) {
+        standing.body?.traverse((object) => {
+          if (!object.name.endsWith('_lid')) return;
+          object.rotation.x = LID_OPEN;
+          opened = true;
+        });
+      }
+      for (const material of standing.materials) material.color?.multiplyScalar(opened ? 0.8 : SPENT_SHADE);
     }
     if (contents.search_spot) {
       const look = SEARCH_MARKERS[layout.type];
@@ -241,6 +314,7 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
       const pulse = 0.5 + 0.5 * Math.sin(time * 2.6);
       for (const material of pulsing) material.emissiveIntensity = 0.12 + 0.3 * pulse;
       if (glow) glow.intensity = 4 + 5 * pulse;
+      if (shell) shell.opacity = 0.12 + 0.2 * pulse;
     },
     dispose() {
       for (const mixer of mixers) mixer.stopAllAction();

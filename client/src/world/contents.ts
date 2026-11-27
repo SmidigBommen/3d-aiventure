@@ -11,12 +11,17 @@ export const CONTACT_RANGE = 1.2; // m
 export const BOSS_SCALE = 1.25;
 
 export interface MonsterContent { id: string; race: string; name: string; level: number }
-export interface EventContent { id: string; title: string; object: string; label: string }
-export interface BossContent { id: string; name: string; level: number; locked: boolean; locked_text: string | null }
+/** `landmark`: a discovery, met at the area's special landmark instead of at an object of its own. */
+export interface EventContent { id: string; title: string; object: string; label: string; landmark: boolean }
+export interface BossContent {
+  id: string; name: string; level: number; locked: boolean; locked_text: string | null;
+  title: string; intro: string | null;
+}
 export interface AreaContents {
   seq: number;
   monster: MonsterContent | null;
   event: EventContent | null;
+  spent: EventContent | null; // the event resolved here since the contents were last rolled
   boss: BossContent | null;
   search_spot: boolean;
 }
@@ -30,6 +35,26 @@ export interface Interaction {
   locked: boolean; // true: E does nothing
   x: number; // the slot
   z: number;
+}
+
+/** Where an event is met: in front of the special landmark for a discovery, else on the event slot. */
+export function eventPlace(slots: ContentSlots, event: { landmark: boolean }): Vec2 {
+  return event.landmark && slots.landmark ? slots.landmark : slots.event;
+}
+
+const GONE = ['traveller', 'townsfolk', 'spirit', 'tracks', 'snare', 'herbs'];
+
+/** What is left of an event object once the event is resolved: it stays (changed), or it has left. */
+export function remainsOf(object: string): 'stays' | 'gone' {
+  return GONE.includes(object) ? 'gone' : 'stays';
+}
+
+/** Where the monster of a fight stands, by the `place` of the battle view. */
+export function fightSlot(slots: ContentSlots, place: string): Vec2 {
+  if (place === 'boss') return slots.boss ?? slots.monster;
+  if (place === 'event') return slots.event;
+  if (place === 'landmark') return slots.landmark ?? slots.event;
+  return slots.monster;
 }
 
 /** What the player standing at `pos` can turn to: the nearest thing within PROMPT_RANGE, or null. */
@@ -48,8 +73,9 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
     }]);
   }
   if (event) {
-    candidates.push([distance(slots.event), {
-      kind: 'event', id: event.id, prompt: `E: look at ${event.label}`, auto: false, locked: false, x: slots.event.x, z: slots.event.z,
+    const at = eventPlace(slots, event);
+    candidates.push([distance(at), {
+      kind: 'event', id: event.id, prompt: `E: look at ${event.label}`, auto: false, locked: false, x: at.x, z: at.z,
     }]);
   }
   if (boss && slots.boss) {
@@ -68,11 +94,14 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   return best ? best[1] : null;
 }
 
-/** What of the contents blocks walking: the event object and the boss. */
+/** What of the contents blocks walking: the event object (also what stays of a spent one) and the boss. A landmark blocks by itself. */
 export function contentSolids(slots: ContentSlots, contents: AreaContents | null): Box[] {
   const solids: Box[] = [];
   if (!contents) return solids;
-  if (contents.event) solids.push({ x: slots.event.x, z: slots.event.z, halfX: 0.5, halfZ: 0.5, height: 1 });
+  const object = (): Box => ({ x: slots.event.x, z: slots.event.z, halfX: 0.5, halfZ: 0.5, height: 1 });
+  const { event, spent } = contents;
+  if (event && !event.landmark) solids.push(object());
+  if (spent && !spent.landmark && remainsOf(spent.object) === 'stays') solids.push(object());
   if (contents.boss && slots.boss) solids.push({ x: slots.boss.x, z: slots.boss.z, halfX: 0.7, halfZ: 0.7, height: 2 });
   return solids;
 }

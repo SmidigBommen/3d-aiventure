@@ -155,14 +155,15 @@ def effect_badges(effects, friendly_is_positive=True):
     return badges
 
 
-def begin_battle(session, monster_state: CombatantState, intro_lines=None) -> bool:
-    """Set up battle state and roll initiative.
+def begin_battle(session, monster_state: CombatantState, intro_lines=None, place: str = "monster") -> bool:
+    """Set up battle state and roll initiative. `place` is where in the area the monster stands.
 
     Returns False if the player was struck down by the opening blow.
     """
     char = session.character
     battle = session.battle
     battle.monster = monster_state
+    session.battle_place = place
     battle.is_active = True
     battle.round_count = 1
     battle.battle_log = list(intro_lines or [])
@@ -204,7 +205,7 @@ def pick_monster(area, location=None) -> dict:
     }
 
 
-def begin_monster_battle(session, picked: dict) -> bool:
+def begin_monster_battle(session, picked: dict, place: str = "monster") -> bool:
     """Start a fight against a monster drawn by pick_monster()."""
     monster = MonsterFactory().create_monster(
         name=picked["name"],
@@ -215,19 +216,26 @@ def begin_monster_battle(session, picked: dict) -> bool:
     )
     state = CombatantState.from_monster(monster)
     state.abilities = list(get_monster_abilities()["races"].get(picked["race"], []))
-    return begin_battle(session, state)
+    return begin_battle(session, state, place=place)
 
 
-def begin_random_battle(session) -> bool:
+def begin_random_battle(session, place: str = "monster") -> bool:
     """Start a fight against a random monster from the current area."""
-    return begin_monster_battle(session, pick_monster(session.current_area, session.current_location))
+    return begin_monster_battle(session, pick_monster(session.current_area, session.current_location), place)
 
 
-def begin_boss_battle(session, boss_id: str) -> bool:
-    """Start a fight against a boss from bosses.json."""
+def begin_boss_battle(session, boss_id: str, place: str = "boss") -> bool:
+    """Start a fight against a boss from bosses.json. The ambush on the road passes place "monster"."""
     boss = get_bosses()[boss_id]
     state = CombatantState.from_boss(boss_id, boss)
-    return begin_battle(session, state, intro_lines=[boss["intro"]] if boss.get("intro") else None)
+    return begin_battle(session, state, intro_lines=[boss["intro"]] if boss.get("intro") else None,
+                        place=place)
+
+
+def enrage_text(monster) -> str:
+    """The line that announces this boss's rage."""
+    boss = get_bosses().get(monster.boss_id, {})
+    return boss.get("enrage_text", f"{monster.name} flies into a rage!")
 
 
 def maybe_enrage(session):
@@ -241,9 +249,7 @@ def maybe_enrage(session):
     monster.cooldowns = {}
     monster.effects.append({"stat": "damage_bonus", "value": 2 + monster.level // 5,
                             "duration": 0, "source": "Enraged"})
-    boss = get_bosses().get(monster.boss_id, {})
-    session.battle.battle_log.append(
-        boss.get("enrage_text", f"{monster.name} flies into a rage!"))
+    session.battle.battle_log.append(enrage_text(monster))
     record(session, "monster", "enrage", name="Enraged", fx="rage")
 
 
@@ -708,6 +714,16 @@ def _effects_view(effects) -> list:
             for eff, badge in zip(effects, effect_badges(effects))]
 
 
+def current_taunt(battle, boss: dict):
+    """What the boss last said: its last line in the stored log, else its first opening line. No dice."""
+    prefix = f'{battle.monster.name}: "'
+    for entry in reversed(battle.battle_log[-BATTLE_LOG_LIMIT:]):
+        if len(entry) > len(prefix) and entry.startswith(prefix) and entry.endswith('"'):
+            return entry[len(prefix):-1]
+    opening = boss.get("taunts", {}).get("start")
+    return opening[0] if opening else None
+
+
 def battle_view(session, fled: bool = False) -> dict:
     """The fight as the 3D client shows it. Reads the session, rolls nothing, changes nothing."""
     battle = session.battle
@@ -764,6 +780,9 @@ def battle_view(session, fled: bool = False) -> dict:
             "title": boss.get("title") if boss else None,
             "enraged": monster.enraged,
             "effects": _effects_view(monster.effects),
+            "taunt": current_taunt(battle, boss) if boss and phase == "fight" else None,
+            "enrage_text": enrage_text(monster) if boss else None,
+            "place": session.battle_place,
         },
         "abilities": abilities,
         "items": item_stacks(char.inventory),

@@ -7,7 +7,7 @@ const view = (over: Partial<BattleView> = {}): BattleView => ({
   player_turn: true,
   turn: { seq: 1, events: [] },
   player: { name: 'Tester', level: 1, hp: 10, max_hp: 10, pp: 2, max_pp: 2, ac: 16, effects: [] },
-  monster: { name: 'Grak', race: 'Goblin', level: 1, hp: 6, max_hp: 6, ac: 12, is_boss: false, boss_id: null, title: null, enraged: false, effects: [] },
+  monster: { name: 'Grak', race: 'Goblin', level: 1, hp: 6, max_hp: 6, ac: 12, is_boss: false, boss_id: null, title: null, enraged: false, effects: [], taunt: null, enrage_text: null, place: 'monster' },
   abilities: [
     { id: 'power_strike', name: 'Power Strike', description: '', cost: 0, summary: [], usable: true, hotkey: '1' },
     { id: 'second_wind', name: 'Second Wind', description: '', cost: 3, summary: [], usable: false, hotkey: '2' },

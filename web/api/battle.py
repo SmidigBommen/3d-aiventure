@@ -47,7 +47,7 @@ def _not_json(constant):
     raise ValueError(f"{constant} is not JSON")
 
 
-async def _body(request: Request):
+async def read_object(request: Request):
     """The request body: {} when there is none, the JSON object when it is one, else None.
 
     Strict JSON: NaN, Infinity and repeated keys are refused, as is anything that is not UTF-8.
@@ -73,7 +73,7 @@ async def _act(request: Request, action, field: str = None, kind: type = None):
         return _refuse(*NO_CHARACTER)
     try:
         fight.check_turn(session)
-        body = await _body(request)
+        body = await read_object(request)
         if body is None:
             return _refuse(*BAD_REQUEST)
         args = ()
@@ -130,7 +130,7 @@ async def carry_on(request: Request):
     session = get_session(request)
     if not session.character:
         return _refuse(*NO_CHARACTER)
-    if await _body(request) is None:
+    if await read_object(request) is None:
         return _refuse(*BAD_REQUEST)
     if fight.battle_view(session)["phase"] != "victory":
         return _refuse(409, "nothing_to_continue", "There is no victory to carry on from.")
@@ -145,7 +145,7 @@ async def revive(request: Request):
     session = get_session(request)
     if not session.character:
         return _refuse(*NO_CHARACTER)
-    if await _body(request) is None:
+    if await read_object(request) is None:
         return _refuse(*BAD_REQUEST)
     try:
         fight.revive(session)

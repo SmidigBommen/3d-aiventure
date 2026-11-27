@@ -2,6 +2,7 @@
 
 import type { BattleAction, BattleView } from './battle/view';
 import type { AreaContents } from './world/contents';
+import type { EventResult, EventView } from './world/event';
 
 export type Danger = 'safe' | 'low' | 'med' | 'high';
 
@@ -79,12 +80,43 @@ export async function postSearch(): Promise<MoveAnswer> {
   return asState(await post<WorldState>('/api/search'));
 }
 
-export type EngageAnswer = { ok: true; url: string; state: WorldState; battle: BattleView | null } | Refusal;
+export type EngageAnswer = { ok: true; url: string; state: WorldState; battle: BattleView | null; event: EventView | null } | Refusal;
 
-/** Meeting the monster, event or boss with this id. Answers the fight, or the page on which an event goes on. */
+/** Meeting the monster, event or boss with this id. Answers the fight, or the event with its choices. */
 export async function postEngage(id: string): Promise<EngageAnswer> {
-  const answer = await post<{ url: string; state: WorldState; battle?: BattleView | null }>('/api/engage', { id });
-  return answer.ok ? { ok: true, url: answer.value.url, state: answer.value.state, battle: answer.value.battle ?? null } : answer;
+  const answer = await post<{ url: string; state: WorldState; battle?: BattleView | null; event?: EventView | null }>('/api/engage', { id });
+  if (!answer.ok) return answer;
+  return { ok: true, url: answer.value.url, state: answer.value.state, battle: answer.value.battle ?? null, event: answer.value.event ?? null };
+}
+
+// --- events ---
+
+type EventBody = { event: EventView | null; result: EventResult | null; state: WorldState; battle?: BattleView | null };
+export type EventAnswer = { ok: true; event: EventView | null; result: EventResult | null; state: WorldState; battle: BattleView | null } | Refusal;
+
+const asEvent = (answer: { ok: true; value: EventBody } | Refusal): EventAnswer =>
+  (answer.ok ? { ok: true, event: answer.value.event, result: answer.value.result, state: answer.value.state, battle: answer.value.battle ?? null } : answer);
+
+/** The pending event, or the outcome of the one just resolved. */
+export async function fetchEvent(): Promise<EventAnswer> {
+  try {
+    const response = await fetch('/api/event', { credentials: 'same-origin', cache: 'no-store' });
+    const answer = await response.json();
+    if (response.ok) return asEvent({ ok: true, value: answer as EventBody });
+    return { ok: false, error: String(answer.error), message: String(answer.message) };
+  } catch {
+    return { ok: false, error: 'network', message: 'The server did not answer.' };
+  }
+}
+
+/** The player's choice. The answer carries the outcome. */
+export async function postEventChoose(choice: number): Promise<EventAnswer> {
+  return asEvent(await post<EventBody>('/api/event/choose', { choice }));
+}
+
+/** The outcome has been read. The answer carries the fight when the outcome led into one. */
+export async function postEventContinue(): Promise<EventAnswer> {
+  return asEvent(await post<EventBody>('/api/event/continue'));
 }
 
 // --- the fight ---
