@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import {
-  BOSS_SCALE, SEARCH_MARKERS, creatureLook, objectLook, remainsOf, type AreaContents, type CreatureLook,
+  BOSS_SCALE, ELARA, ELARA_IDLE, SEARCH_MARKERS, creatureLook, objectLook, remainsOf, type AreaContents, type CreatureLook,
 } from './contents';
-import { footprint, modelSize, type Placement } from './dressing';
+import { footprint, modelSize, stallFront, type Placement } from './dressing';
 import type { AreaLayout } from './layout';
 import type { Figure } from './modelLoader';
 
@@ -10,7 +10,8 @@ import type { Figure } from './modelLoader';
 // the search spot, each with its name above it. Which model shows what is decided in contents.ts;
 // what is present is decided by the server. A discovery has no object of its own: the special
 // landmark of the area (drawn by areaScene.ts) glows instead. What stays of a resolved event stands
-// where it stood, without glow, light or name. Rebuilt whenever the contents change.
+// where it stood, without glow, light or name. Elara stands in her stall whatever the area holds, with a
+// gold "!" above her while a quest waits to be turned in. Rebuilt whenever the contents change.
 
 const GOLD = '#daa520'; // the gold of the classic headings
 const INK = '#e8dcc4';
@@ -25,6 +26,8 @@ export interface ContentScene {
   group: THREE.Group;
   /** Called every frame with the player's position. */
   update: (x: number, z: number, time: number, dt: number) => void;
+  /** Whether the "!" above Elara shows: a quest is ready to be turned in. */
+  setQuestReady: (ready: boolean) => void;
   dispose: () => void;
 }
 
@@ -33,8 +36,9 @@ const staysOnSlot = (spent: AreaContents['spent']): boolean => Boolean(spent) &&
 
 /** The models a content scene for these contents is drawn from. `landmark`: the special landmark of the dressing. */
 export function contentModels(layout: AreaLayout, contents: AreaContents | null, landmark: Placement | null = null): string[] {
-  if (!contents) return [];
   const keys: string[] = [];
+  if (layout.slots?.shop) keys.push(ELARA.model);
+  if (!contents) return keys;
   if (contents.monster) keys.push(creatureLook(contents.monster.race).model);
   if (contents.event && !contents.event.landmark) keys.push(objectLook(contents.event.object).model);
   if (contents.event?.landmark && landmark) keys.push(landmark.model);
@@ -67,6 +71,28 @@ function label(lines: string[]): THREE.Sprite {
   texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, fog: false, transparent: true, depthWrite: false }));
   sprite.scale.set(LABEL_WIDTH, (LABEL_WIDTH * canvas.height) / canvas.width, 1);
+  return sprite;
+}
+
+/** The gold "!" above Elara while a quest is ready to be turned in. */
+function questMark(): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const g = canvas.getContext('2d') as CanvasRenderingContext2D;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.font = '700 116px Cinzel, Georgia, serif';
+  g.lineWidth = 10;
+  g.strokeStyle = 'rgba(11, 10, 16, 0.9)';
+  g.strokeText('!', 64, 70);
+  g.fillStyle = '#ffd54a';
+  g.fillText('!', 64, 70);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, fog: false, transparent: true, depthWrite: false, depthTest: false }));
+  sprite.renderOrder = 11;
+  sprite.scale.set(0.7, 0.7, 1);
   return sprite;
 }
 
@@ -165,6 +191,7 @@ export function standModel(look: Look, figure: Figure | null): Standing {
 
 export function buildContentScene(
   layout: AreaLayout, contents: AreaContents | null, figures: Map<string, Figure | null>, landmark: Placement | null = null,
+  stall: Placement | null = null,
 ): ContentScene {
   const group = new THREE.Group();
   const owned: { dispose: () => void }[] = []; // made here; what belongs to the loader stays
@@ -180,11 +207,11 @@ export function buildContentScene(
   const slots = layout.slots;
 
   /** A model standing at (x, z); a figure with clips plays its idle. */
-  const stand = (look: Look, x: number, z: number): { root: THREE.Object3D; top: number; materials: THREE.MeshStandardMaterial[] } => {
+  const stand = (look: Look, x: number, z: number, clip: string | null = null): { root: THREE.Object3D; top: number; materials: THREE.MeshStandardMaterial[] } => {
     const standing = own(standModel(look, figures.get(look.model) ?? null));
     standing.root.position.set(x, 0, z);
     group.add(standing.root);
-    const idle = standing.body ? idleClip(standing.clips) : null;
+    const idle = standing.body ? (standing.clips.find((c) => c.name === clip) ?? idleClip(standing.clips)) : null;
     if (idle && standing.body) {
       const mixer = new THREE.AnimationMixer(standing.body);
       mixer.clipAction(idle).play();
@@ -208,6 +235,27 @@ export function buildContentScene(
     sprite.position.set(x, layout.ceiling === null ? y : Math.min(y, layout.ceiling - half - 0.02), z);
     group.add(sprite);
   };
+
+  let mark: THREE.Sprite | null = null;
+  let markY = 0;
+  if (slots?.shop) {
+    // Elara, behind the table of her stall, looking out of the side the player comes from.
+    const { x, z } = slots.shop;
+    const { root, top } = stand(ELARA, x, z, ELARA_IDLE);
+    const front = stall ? stallFront(stall, layout.spawn) : { x: layout.spawn.x - x, z: layout.spawn.z - z };
+    root.rotation.y = Math.atan2(front.x, front.z);
+    // Her plate and the mark above it hang under the roof and show through the posts of the stall.
+    // The bounds of a skinned figure can come out taller than it stands: the file's height decides.
+    const tall = Math.min(top, modelSize(ELARA.model)[1] * ELARA.scale);
+    name(['Elara'], x, z, tall, true);
+    mark = questMark();
+    own(mark.material);
+    own(mark.material.map as THREE.Texture);
+    markY = tall + 1.0;
+    mark.position.set(x, markY, z);
+    mark.visible = false;
+    group.add(mark);
+  }
 
   if (contents && slots) {
     const creature = (look: CreatureLook, scale: number): Look => ({ ...look, scale });
@@ -315,6 +363,10 @@ export function buildContentScene(
       for (const material of pulsing) material.emissiveIntensity = 0.12 + 0.3 * pulse;
       if (glow) glow.intensity = 4 + 5 * pulse;
       if (shell) shell.opacity = 0.12 + 0.2 * pulse;
+      if (mark) mark.position.y = markY + 0.08 * Math.sin(time * 3);
+    },
+    setQuestReady(ready) {
+      if (mark) mark.visible = ready;
     },
     dispose() {
       for (const mixer of mixers) mixer.stopAllAction();

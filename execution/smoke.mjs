@@ -8,6 +8,8 @@
 // failure, one that ends in a fight, a discovery at its landmark) and fights the first boss to the end.
 // In both modes it opens the inventory and the character sheet; with --serve it also drinks a potion,
 // equips a weapon and an armour, spends an ability point and rests at the inn front.
+// In both modes it talks to Elara in the market and looks at the three tabs of her shop; with --serve it
+// also haggles (a success and a failure), buys, sells, and takes a quest from accepted to turned in.
 // The d20 of those events is fixed through execution/smoke_server.py, which it starts the server with.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
@@ -1106,6 +1108,8 @@ try {
     wake();
     await page.waitForFunction(() => window.__aiv.resting === false, null, { timeout: 10000 });
     await page.unroute('**/api/rest');
+    // As with the black: the fade back was seen to lag behind the clock in the headless browser.
+    await page.waitForFunction(() => Number(getComputedStyle(document.getElementById('veil')).opacity) <= 0.05, null, { timeout: 15000 }).catch(() => {});
     const rested = await page.evaluate(() => ({
       c: window.__aiv.state.character, notice: document.getElementById('notice').hidden ? null : document.getElementById('notice').textContent,
       veil: Number(getComputedStyle(document.getElementById('veil')).opacity),
@@ -1118,6 +1122,175 @@ try {
     if (new URL(page.url()).pathname !== '/') errors.push(`resting left / for ${page.url()}`);
   } else {
     console.log(`skipped without --serve (the session cannot be edited): ${sheetSteps.join(', ')}`);
+  }
+
+  // 16b. Elara's shop: she stands in her stall in the market, E opens the panel, 1, 2, 3 switch its tabs.
+  await moveAndEnter('market');
+  if (!(await page.evaluate(() => window.__aiv.layout.slots.shop !== null))) errors.push('elara: the market has no shop slot');
+  const shopNow = () => page.evaluate(() => ({
+    panel: window.__aiv.panel, screen: window.__aiv.screen, prompt: window.__aiv.prompt, interaction: window.__aiv.interaction, menu: window.__aiv.menuOpen,
+    tab: window.__aiv.shop?.tab ?? null, player: window.__aiv.player, shown: !document.getElementById('shop-panel').hidden,
+    active: [...document.querySelectorAll('.shop-tab.active')].map((tab) => tab.id), locked: document.pointerLockElement !== null,
+  }));
+  const openShop = async (name) => {
+    await walkTo('shop', 2.5);
+    if (name) await promptShot('E: talk to Elara', name);
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.panel === 'shop' && window.__aiv.shop !== null, null, { timeout: 10000 });
+    const seen = await shopNow();
+    if (seen.screen !== 'world' || seen.prompt !== null || seen.interaction !== null || seen.menu || !seen.shown || seen.locked || seen.tab !== 'wares') errors.push(`shop opened: ${JSON.stringify(seen)}`);
+    return seen;
+  };
+  const shopTab = async (key, tab, name) => {
+    await page.keyboard.press(key);
+    const seen = await shopNow();
+    if (seen.tab !== tab || JSON.stringify(seen.active) !== JSON.stringify([`shop-tab-${tab}`]) || !(await page.isVisible(`#shop-${tab}`))) errors.push(`${name}: after ${key}: ${JSON.stringify(seen)}`);
+    if (name) await shot(name);
+  };
+  const closeShop = async (name) => {
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__aiv.panel === null, null, { timeout: 5000 });
+    const seen = await shopNow();
+    if (seen.shown || seen.menu || seen.screen !== 'world') errors.push(`${name}: after Esc: ${JSON.stringify(seen)}`);
+  };
+  const atCounter = await openShop('elara');
+  if ((await page.locator('#shop-wares .shop-row').count()) !== 3) errors.push('shop-wares: the panel does not list three wares');
+  if (!(await page.textContent('#shop-dialog')) || !(await page.getAttribute('#shop-portrait', 'src'))) errors.push('shop-wares: Elara has no line or no portrait');
+  // Nobody walks, and E, I, C and M do nothing while the shop is open.
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(300);
+  await page.keyboard.up('KeyW');
+  for (const key of ['KeyE', 'KeyI', 'KeyC', 'KeyM']) await page.keyboard.press(key);
+  await page.waitForTimeout(200);
+  const calm = await shopNow();
+  if (calm.panel !== 'shop' || calm.menu || calm.player.x !== atCounter.player.x || calm.player.z !== atCounter.player.z) errors.push(`shop-wares: W, E, I, C or M did something: ${JSON.stringify(calm)}`);
+  await shopTab('Digit1', 'wares', 'shop-wares');
+  await shopTab('Digit2', 'sell', 'shop-sell');
+  await shopTab('Digit3', 'quests', 'shop-quests');
+  if ((await page.locator('#shop-quests [data-action="accept"]').count()) < 1) errors.push('shop-quests: no quest is on offer');
+  await closeShop('shop-quests');
+  if (new URL(page.url()).pathname !== '/') errors.push(`the shop left / for ${page.url()}`);
+
+  const shopSteps = ['shop-haggle-success', 'shop-haggle-failure', 'shop-bought', 'shop-sold', 'quest-accepted', 'quest-tracker', 'quest-ready', 'quest-turned-in'];
+  if (serve) {
+    const questName = JSON.parse(readFileSync(join(repo, 'json/quests.json'), 'utf8')).goblin_menace.name;
+    const gold = () => page.evaluate(() => window.__aiv.state.character.gold);
+    const hudGold = async () => Number(/Gold (\d+)/.exec(await page.textContent('#hud-character'))?.[1]);
+    const said = async (text, name) => {
+      await page.waitForFunction((t) => document.querySelector('#shop-panel .panel-message')?.textContent === t, text, { timeout: 10000 })
+        .catch(() => errors.push(`${name}: the panel does not say "${text}"`));
+    };
+    const tracker = () => page.evaluate(() => (document.getElementById('hud-quests').hidden ? null : [...document.querySelectorAll('#hud-quests .quest-line')].map((line) => line.textContent)));
+    const haggleOver = async (index, d20, outcome, name) => {
+      writeFileSync(join(dataDir, 'd20.txt'), String(d20));
+      await page.click(`#shop-wares [data-action="haggle"][data-index="${index}"]`);
+      await page.waitForFunction((o) => window.__aiv.shop?.haggle?.outcome === o, outcome, { timeout: 10000 })
+        .catch(() => errors.push(`${name}: the haggle did not come out as a ${outcome}`));
+      const seen = await page.evaluate((i) => ({
+        ware: window.__aiv.shop.view.wares[i], haggle: window.__aiv.shop.haggle, cls: document.getElementById('shop-haggle').className,
+        shown: !document.getElementById('shop-haggle').hidden, text: document.getElementById('shop-haggle').textContent,
+      }), index);
+      if (!seen.shown || seen.cls !== `haggle-${outcome}` || !seen.text.includes(seen.haggle.roll) || !seen.text.includes(seen.haggle.verdict)) errors.push(`${name}: ${JSON.stringify(seen)}`);
+      await shot(name);
+      return seen.ware;
+    };
+    editSession((session) => {
+      session.character.gold = 200;
+      session.character.inventory.push({ name: 'Dagger', type: 'weapon' });
+    });
+    await openShop(null);
+    if ((await gold()) !== 200 || (await hudGold()) !== 200) errors.push(`the shop opened with ${await gold()} gold, the HUD says ${await hudGold()}`);
+
+    // 1. A haggle that works: the gold flash and a lower price.
+    const cheap = await haggleOver(1, 19, 'success', 'shop-haggle-success');
+    if (!(cheap.haggled && cheap.effective_price < cheap.original_price)) errors.push(`shop-haggle-success: the price did not go down: ${JSON.stringify(cheap)}`);
+    // 2. One that does not: the red flash. A second try at the same ware is refused.
+    const dear = await haggleOver(0, 2, 'failure', 'shop-haggle-failure');
+    if (!(dear.haggled && dear.effective_price >= dear.original_price)) errors.push(`shop-haggle-failure: ${JSON.stringify(dear)}`);
+    if (!(await page.isDisabled('#shop-wares [data-action="haggle"][data-index="0"]'))) errors.push('shop-haggle-failure: the Haggle button of a haggled ware is not disabled');
+    // The button is disabled by now; a page that has not heard of the haggle yet would still send it.
+    await page.evaluate(() => document.querySelector('#shop-wares [data-action="haggle"][data-index="0"]').removeAttribute('disabled'));
+    await page.click('#shop-wares [data-action="haggle"][data-index="0"]');
+    await said("You've already haggled over this item!", 'shop-haggle-failure');
+    // That refusal is the 409 this step asks for: its status line and console message are taken out of the report.
+    const refusals = errors.filter((line) => line.includes('/api/shop/haggle'));
+    if (!refusals.some((line) => line.startsWith('409 '))) errors.push('shop-haggle-failure: the second haggle was not refused with a 409');
+    for (const line of refusals) errors.splice(errors.indexOf(line), 1);
+    if (!(await page.evaluate(() => document.querySelector('#shop-panel .panel-message').classList.contains('refused')))) errors.push('shop-haggle-failure: the refusal is not shown as one');
+
+    // 3. Two potions bought, one at the haggled price.
+    const greater = await page.evaluate(() => window.__aiv.shop.view.wares[2]);
+    await page.click('#shop-wares [data-action="buy"][data-index="1"]');
+    await said(`Purchased ${cheap.name} for ${cheap.effective_price} gold!`, 'shop-bought');
+    await page.click('#shop-wares [data-action="buy"][data-index="2"]');
+    await said(`Purchased ${greater.name} for ${greater.effective_price} gold!`, 'shop-bought');
+    const left = 200 - cheap.effective_price - greater.effective_price;
+    if ((await gold()) !== left || (await hudGold()) !== left || (await page.textContent('#shop-gold')) !== `${left} gold`) errors.push(`shop-bought: ${await gold()} gold, the HUD says ${await hudGold()}, expected ${left}`);
+    await shot('shop-bought');
+
+    // 4. The spare weapon sold.
+    await shopTab('Digit2', 'sell', null);
+    await page.locator('#shop-sell .shop-row', { hasText: 'Dagger' }).first().locator('[data-action="sell"]').click();
+    await page.waitForFunction(() => /^Sold Dagger for \d+ gold!$/.test(document.querySelector('#shop-panel .panel-message')?.textContent ?? ''), null, { timeout: 10000 })
+      .catch(() => errors.push('shop-sold: the panel does not say that the dagger was sold'));
+    if (!((await gold()) > left && (await hudGold()) === (await gold()))) errors.push(`shop-sold: ${await gold()} gold after the sale, ${left} before`);
+    await shot('shop-sold');
+
+    // 5. A quest accepted: the tracker shows it.
+    await shopTab('Digit3', 'quests', null);
+    await page.click('#shop-quests [data-action="accept"][data-quest="goblin_menace"]');
+    await said(`Quest accepted: ${questName}`, 'quest-accepted');
+    if (JSON.stringify(await tracker()) !== JSON.stringify([`${questName} 0/5`])) errors.push(`quest-accepted: the tracker shows ${JSON.stringify(await tracker())}`);
+    await shot('quest-accepted');
+    await closeShop('quest-accepted');
+
+    // 6. Two goblins fall at the docks: the tracker counts, the kill is announced, the quest is ready.
+    editSession((session) => {
+      session.active_quests.goblin_menace.progress = 3;
+    });
+    await moveAndEnter('docks');
+    const fallGoblin = async (id, name) => {
+      plant({ id, race: 'Goblin', class_name: 'Rogue', level: 1, name: 'Snik', weapon: 'Club' }, null);
+      await openTitle();
+      await enterWorld();
+      await walkTo('monster', 2.6);
+      const stance = await startFight(name);
+      await fightUntil('KeyA', 'victory', name);
+      const result = await page.textContent('#battle-result');
+      await page.keyboard.press('Enter');
+      await backToWalking(stance, name);
+      return result;
+    };
+    const first = await fallGoblin('smoke-quest-goblin-1', 'quest-tracker');
+    if (!first.includes(`${questName}: 4/5`)) errors.push(`quest-tracker: the result panel does not show the quest: "${first}"`);
+    const told = await page.evaluate(() => (document.getElementById('notice').hidden ? null : document.getElementById('notice').textContent));
+    if (told !== `Quest: ${questName}: 4/5`) errors.push(`quest-tracker: #notice shows ${JSON.stringify(told)}`);
+    if (JSON.stringify(await tracker()) !== JSON.stringify([`${questName} 4/5`])) errors.push(`quest-tracker: the tracker shows ${JSON.stringify(await tracker())}`);
+    if (await page.isVisible('#hud-quest-ready')) errors.push('quest-tracker: the badge shows before the quest is ready');
+    await worldShot('quest-tracker');
+    await fallGoblin('smoke-quest-goblin-2', 'quest-ready');
+    const ready = await page.evaluate(() => ({ hidden: document.getElementById('hud-quest-ready').hidden, text: document.getElementById('hud-quest-ready').textContent }));
+    if (ready.hidden || ready.text !== 'Quest ready to turn in') errors.push(`quest-ready: the badge: ${JSON.stringify(ready)}`);
+    if (JSON.stringify(await tracker()) !== JSON.stringify([`${questName}: return to Elara`])) errors.push(`quest-ready: the tracker shows ${JSON.stringify(await tracker())}`);
+
+    // 7. Back to Elara, who has a "!" above her: the quest is turned in.
+    await moveAndEnter('market');
+    await walkTo('shop', 2.5);
+    await worldShot('quest-ready');
+    const rich = await gold();
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.panel === 'shop' && window.__aiv.shop !== null, null, { timeout: 10000 });
+    await shopTab('Digit3', 'quests', null);
+    await page.click('#shop-quests [data-action="turn-in"][data-quest="goblin_menace"]');
+    await page.waitForFunction((n) => (document.querySelector('#shop-panel .panel-message')?.textContent ?? '').startsWith(`Quest complete: ${n}! +50 gold, +200 XP`), questName, { timeout: 10000 })
+      .catch(() => errors.push('quest-turned-in: the panel does not say that the quest is complete'));
+    if ((await gold()) !== rich + 50 || (await hudGold()) !== rich + 50) errors.push(`quest-turned-in: ${await gold()} gold, ${rich} before`);
+    if ((await tracker()) !== null || (await page.isVisible('#hud-quest-ready'))) errors.push('quest-turned-in: the tracker or the badge still shows');
+    await shot('quest-turned-in');
+    await closeShop('quest-turned-in');
+    if (new URL(page.url()).pathname !== '/') errors.push(`the shop and the quests left / for ${page.url()}`);
+  } else {
+    console.log(`skipped without --serve (the session cannot be edited): ${shopSteps.join(', ')}`);
   }
 
   // 17. A model that does not load: a fresh page in the town square, with the request for the well refused.

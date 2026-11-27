@@ -26,10 +26,10 @@ export interface AreaContents {
   search_spot: boolean;
 }
 
-export type InteractionKind = 'monster' | 'event' | 'boss' | 'search' | 'rest';
+export type InteractionKind = 'monster' | 'event' | 'boss' | 'search' | 'rest' | 'shop';
 export interface Interaction {
   kind: InteractionKind;
-  id: string | null; // the content id to engage; null for 'search' and 'rest'
+  id: string | null; // the content id to engage; null for 'search', 'rest' and 'shop'
   prompt: string;
   auto: boolean; // true: start without a key press
   locked: boolean; // true: E does nothing
@@ -63,7 +63,7 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   if (!contents || !slots) return null;
   const { monster, event, boss } = contents;
   const distance = (slot: Vec2): number => Math.hypot(slot.x - pos.x, slot.z - pos.z);
-  // In the order that decides a tie: monster, event, boss, search, rest.
+  // In the order that decides a tie: monster, event, boss, search, rest, shop.
   const candidates: [number, Interaction][] = [];
   if (monster) {
     const d = distance(slots.monster);
@@ -92,6 +92,11 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   if (rest) {
     candidates.push([distance(rest), { kind: 'rest', id: null, prompt: 'E: rest', auto: false, locked: false, x: rest.x, z: rest.z }]);
   }
+  // Elara, in her stall. A slots object of before this field existed has no shop.
+  const shop = slots.shop ?? null;
+  if (shop) {
+    candidates.push([distance(shop), { kind: 'shop', id: null, prompt: 'E: talk to Elara', auto: false, locked: false, x: shop.x, z: shop.z }]);
+  }
   let best: [number, Interaction] | null = null;
   for (const candidate of candidates) {
     if (candidate[0] <= PROMPT_RANGE && (best === null || candidate[0] < best[0])) best = candidate;
@@ -117,6 +122,10 @@ export interface CreatureLook { model: string; scale: number; tint: string | nul
 
 const look = (model: string, scale: number, tint: string | null = null, opacity = 1, emissive: string | null = null): CreatureLook =>
   ({ model: `creatures/${model}`, scale, tint, opacity, emissive });
+
+/** Elara the shopkeeper and the clip she stands in (MODELS.md). */
+export const ELARA: CreatureLook = { model: 'npcs/woman_dress', scale: 0.37, tint: null, opacity: 1, emissive: null };
+export const ELARA_IDLE = 'HumanArmature|Female_Idle';
 
 /** Keyed by monster race and by boss id; the values of MODELS.md table 1. A boss is drawn at its scale times BOSS_SCALE. */
 export const CREATURES: Record<string, CreatureLook> = {

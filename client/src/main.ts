@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {
-  fetchBattle, fetchCharacter, fetchEvent, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose,
-  postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postUnequip, type CharacterAnswer, type WorldState,
+  fetchBattle, fetchCharacter, fetchEvent, fetchShop, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose,
+  postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postShopItem, postShopQuest, postUnequip,
+  type CharacterAnswer, type ShopAnswer, type WorldState,
 } from './api';
 import { buildBattleScene, type BattleScene, type Rage } from './battle/battleScene';
 import { bossLook, enrageCue } from './battle/boss';
@@ -25,6 +26,8 @@ import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from 
 import { loadFigures, loadModels, modelErrors, type Figure } from './world/modelLoader';
 import { panelForKey, type InventoryView, type PanelKind, type SheetView } from './world/sheet';
 import { bindSheetPanels, renderInventory, renderSheet, showSheetPanel, type PanelMessage } from './world/sheetPanel';
+import { haggleFeedback, killAnnouncement, readyCount, tabForKey, type ShopTab, type ShopView } from './world/shop';
+import { bindShopPanel, renderShop, showHaggle, showShopPanel, type HaggleShown } from './world/shopPanel';
 import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
 type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro';
@@ -33,6 +36,13 @@ type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro';
 interface Happening {
   view: EventView | null;
   result: EventResult | null;
+}
+
+/** Elara's shop while its panel is open: the last view, the open tab and how the last haggle went. */
+interface Store {
+  view: ShopView;
+  tab: ShopTab;
+  haggle: HaggleShown | null;
 }
 
 /** A fight in the world: the view the server last answered and where its playback stands. */
@@ -55,6 +65,7 @@ interface Fight {
 // While the inventory or the character sheet is on screen `panel` names it, `screen` stays 'world'
 // and there is no interaction or prompt; `inventory` and `sheet` are the views of the last answer.
 // `resting` is true from the E press at the rest landmark until the view has faded back in.
+// While Elara's shop is open `panel` is 'shop' and `shop` holds the view, the tab and the last haggle.
 declare global {
   interface Window {
     __aiv: {
@@ -75,7 +86,8 @@ declare global {
       readonly battle: Fight | null;
       readonly event: Happening | null;
       readonly intro: string | null;
-      readonly panel: PanelKind | null;
+      readonly panel: PanelKind | 'shop' | null;
+      readonly shop: Store | null;
       readonly inventory: InventoryView | null;
       readonly sheet: SheetView | null;
       readonly resting: boolean;
@@ -129,7 +141,8 @@ let introBoss: string | null = null; // the boss the introduction panel shows
 
 // The inventory and the character sheet: which of the two is on screen, and the views of the last answer.
 const REST_FADE_MS = 500;
-let panel: PanelKind | null = null;
+let panel: PanelKind | 'shop' | null = null;
+let store: Store | null = null; // Elara's shop, while its panel is open
 let panelAsked = 0; // goes up with every opening and closing, so that an older answer opens nothing
 let panelLocked = false; // an action of a panel is on its way to the server
 let panelMessage: PanelMessage | null = null;
@@ -148,6 +161,7 @@ const turn = (dYaw: number, dPitch: number): void => {
 // when the area left behind is still under the veil.
 const shown = (): boolean => (inWorld() || inFight() || inPanel()) && !loading;
 const landmarkOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'special') ?? null;
+const stallOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'shop') ?? null;
 const contentsOf = (s: WorldState | null): AreaContents | null => s?.contents ?? null;
 const interactionNow = (): Interaction | null => (inWorld() && !loading && !panel && layout ? interactionAt(player, layout, contentsOf(state)) : null);
 const promptNow = (): string | null => (menuOpen || busy || crossing || resting ? null : (interactionNow()?.prompt ?? null));
@@ -176,6 +190,7 @@ window.__aiv = {
   get event() { return screen === 'event' ? happening : null; },
   get intro() { return screen === 'intro' ? introBoss : null; },
   get panel() { return panel; },
+  get shop() { return panel === 'shop' ? store : null; },
   get inventory() { return character?.inventory ?? null; },
   get sheet() { return character?.sheet ?? null; },
   get resting() { return resting; },
@@ -242,7 +257,7 @@ function placeContents(contents: AreaContents | null, figures: Map<string, Figur
     area.scene.remove(things.group);
     things.dispose();
   }
-  things = buildContentScene(layout, drawn(contents), figures, landmarkOf(dressing));
+  things = buildContentScene(layout, drawn(contents), figures, landmarkOf(dressing), stallOf(dressing));
   area.scene.add(things.group);
   const solids = layout.slots ? contentSolids(layout.slots, contents) : [];
   walkLayout = { ...layout, props: [...layout.props, ...solids.map((box) => ({ ...box, kind: 'model' as const }))] };
@@ -664,11 +679,17 @@ async function proceed(): Promise<void> {
   if (!fight || fight.result !== 'victory' || busy) return;
   busy = true;
   const mine = entry;
+  const announcement = killAnnouncement(fight.view.rewards?.quest_updates ?? []);
   const answer = await postBattleContinue();
   busy = false;
   if (mine !== entry) return;
-  if (answer.ok) await resumeWalk(answer.state);
-  else await refresh();
+  if (!answer.ok) {
+    await refresh();
+    return;
+  }
+  await resumeWalk(answer.state);
+  // What the kill did for a quest, once more, now that the tracker shows it.
+  if (announcement !== null) showNotice(announcement);
 }
 
 /** Rise Again after a defeat: the healer's price is paid and the player stands in the area the server names. */
@@ -854,7 +875,15 @@ async function search(): Promise<void> {
 // --- inventory, character sheet and rest ---------------------------------------------------------
 
 function drawPanel(): void {
+  if (panel === 'shop') {
+    if (!store) return;
+    renderShop(store.view, store.tab, panelMessage, panelLocked);
+    showSheetPanel(null);
+    showShopPanel(true);
+    return;
+  }
   if (!panel || !character) return;
+  showShopPanel(false);
   if (panel === 'inventory') renderInventory(character.inventory, character.sheet, panelMessage, panelLocked);
   else renderSheet(character.sheet, panelMessage, panelLocked);
   showSheetPanel(panel);
@@ -865,7 +894,9 @@ function closePanel(): void {
   panel = null;
   panelLocked = false;
   panelMessage = null;
+  store = null;
   showSheetPanel(null);
+  showShopPanel(false);
 }
 
 /** Whether I, C and the menu entries open a panel now: walking in the world, nothing else going on. */
@@ -929,6 +960,73 @@ bindSheetPanels({
   close: () => closePanel(),
 });
 
+// --- Elara's shop ----------------------------------------------------------------------------------
+
+/** Opens the shop panel: the player turns to Elara at `at`, the server is asked and the panel shows its answer. */
+async function openShop(at: Vec2): Promise<void> {
+  if (!panelAllowed() || menuOpen) return;
+  const asked = ++panelAsked;
+  const mine = entry;
+  const answer = await fetchShop();
+  if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
+  if (!answer.ok) {
+    showNotice(answer.message);
+    return;
+  }
+  const t = turnTowards(view, player, at);
+  turn(t.dYaw, t.dPitch);
+  store = { view: answer.shop, tab: 'wares', haggle: null };
+  state = answer.state;
+  showHud(answer.state, false);
+  panel = 'shop';
+  panelLocked = false;
+  panelMessage = null;
+  held.clear();
+  showPrompt(null);
+  showHaggle(null, false);
+  drawPanel();
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+
+function shopTab(tab: ShopTab): void {
+  if (panel !== 'shop' || !store) return;
+  store.tab = tab;
+  drawPanel();
+}
+
+/** What a button of the shop does: the action goes to the server and the panel is drawn again from the answer. */
+async function shopAction(send: () => Promise<ShopAnswer>): Promise<void> {
+  if (panel !== 'shop' || !store || panelLocked) return;
+  panelLocked = true;
+  drawPanel();
+  const asked = panelAsked;
+  const answer = await send();
+  if (asked !== panelAsked || !store) return;
+  panelLocked = false;
+  if (answer.ok) {
+    store.view = answer.shop;
+    state = answer.state;
+    showHud(answer.state, false);
+    if (answer.haggle) {
+      store.haggle = haggleFeedback(answer.haggle);
+      showHaggle(store.haggle, true);
+    }
+    panelMessage = answer.message === null ? null : { text: answer.message, refused: false };
+  } else {
+    // Refused: Elara may have a line for it.
+    if (answer.dialog) store.view = { ...store.view, dialog: answer.dialog };
+    panelMessage = { text: answer.message, refused: true };
+  }
+  drawPanel();
+}
+
+bindShopPanel({
+  item: (action, index) => void shopAction(() => postShopItem(action, index)),
+  quest: (action, id) => void shopAction(() => postShopQuest(action, id)),
+  tab: (tab) => shopTab(tab),
+  close: () => closePanel(),
+});
+
 const wait = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
 
 /** Rests at the rest landmark: the view goes black, the server restores, the view comes back. */
@@ -954,6 +1052,7 @@ async function interact(): Promise<void> {
   if (!hit || hit.locked) return;
   const boss = hit.kind === 'boss' ? (contentsOf(state)?.boss ?? null) : null;
   if (hit.kind === 'rest') await rest();
+  else if (hit.kind === 'shop') await openShop({ x: hit.x, z: hit.z });
   else if (hit.kind === 'search') await search();
   else if (boss) openIntro(boss, { x: hit.x, z: hit.z });
   else if (hit.id !== null) await engage(hit.id);
@@ -1012,6 +1111,15 @@ window.addEventListener('keydown', (event) => {
   if (resting) {
     // The view is black: keys do nothing.
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
+    return;
+  }
+  if (panel === 'shop') {
+    // The shop is open: 1, 2, 3 switch tabs and Esc closes; nothing walks, and E, I, C and M do nothing.
+    if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
+    if (event.repeat) return;
+    const tab = tabForKey(event.code);
+    if (event.code === 'Escape') closePanel();
+    else if (tab) shopTab(tab);
     return;
   }
   const wanted = panelForKey(event.code);
@@ -1130,6 +1238,7 @@ renderer.setAnimationLoop(() => {
       }
     }
     showPrompt(promptNow());
+    things?.setQuestReady(readyCount(state?.quests ?? []) > 0);
     eye.position.set(player.x, EYE_HEIGHT, player.z);
     eye.rotation.set(view.pitch, view.yaw, 0);
     area.update(player.x, player.z, time);

@@ -18,7 +18,7 @@ from dice import Dice
 from items import HealingPotion
 from character import WeaponSlot
 from lootGenerator import LootGenerator
-from web.routes.shop import restock_shop
+from web.shop import restock_shop
 from engine.effects import (
     get_effect_bonus, tick_effects, is_stunned, resolve_round_conditions,
     describe_effect, CONDITION_LABELS, DOT_STATS,

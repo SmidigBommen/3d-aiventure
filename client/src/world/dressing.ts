@@ -812,6 +812,9 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   // After the special landmark's point, which it keeps off like the other slots.
   const resting = standing.find((c) => c.placement.landmark === 'rest') ?? null;
   if (resting) slots.rest = landmarkPoint({ halfX, halfZ }, solids, layout.spawn, layout.gates, resting.placement.solid ?? { ...resting.rect, height: 0 }, slots);
+  // Elara stands inside her stall, behind its table: no obstacle is added and no path changes.
+  const stall = placements.find((p) => p.landmark === 'shop') ?? null;
+  if (stall) slots.shop = keeperPoint(stall, layout.spawn);
   return {
     mood: moodFor(area.location, area.type),
     placements,
@@ -953,15 +956,37 @@ function chooseSlots(
       for (const event of events.slice(0, 40)) {
         if (!apart(event, [monster], spacing)) continue;
         const search = searches.find((p) => apart(p, [monster, event], spacing));
-        if (search) return { monster, event, search, boss, landmark: null, rest: null };
+        if (search) return { monster, event, search, boss, landmark: null, rest: null, shop: null };
       }
     }
   }
   // No room at all (a floor smaller than any the game builds): everything beside the spawn.
   return {
     monster: { x: spawn.x + 1, z: spawn.z }, event: { x: spawn.x - 1, z: spawn.z }, search: { x: spawn.x, z: spawn.z + 1 },
-    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null, rest: null,
+    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null, rest: null, shop: null,
   };
+}
+
+/**
+ * The side of a market stall its keeper looks out of, as a unit vector on the floor. The stall is open on both
+ * long sides of the table that runs through it (the model's x axis); the keeper serves the side the default
+ * spawn is on, so whoever comes in sees her face.
+ */
+export function stallFront(stall: Placement, spawn: Vec2): Vec2 {
+  const side = { x: Math.cos(stall.rotation), z: -Math.sin(stall.rotation) };
+  const towards = side.x * (spawn.x - stall.x) + side.z * (spawn.z - stall.z);
+  return towards >= 0 ? side : { x: -side.x, z: -side.z };
+}
+
+const KEEPER_BACK = 0.85; // m from the middle of the stall to where the keeper stands, behind the table
+
+/** Where the shopkeeper stands in the stall `stall`: in its solid box, behind the table. */
+function keeperPoint(stall: Placement, spawn: Vec2): Vec2 {
+  const box = stall.solid;
+  if (!box) return { x: stall.x, z: stall.z };
+  const front = stallFront(stall, spawn);
+  const clamp = (v: number, half: number): number => Math.max(-half, Math.min(half, v));
+  return { x: box.x + clamp(-front.x * KEEPER_BACK, box.halfX), z: box.z + clamp(-front.z * KEEPER_BACK, box.halfZ) };
 }
 
 const LANDMARK_REACH = 1.75; // m from the landmark to where one stands at it (the rule is 2)
