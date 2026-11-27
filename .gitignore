@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+client/dist/
+web/sessions/
+web/saves/
+data/
+.DS_Store

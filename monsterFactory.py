@@ -1,0 +1,32 @@
+import json
+from monster import Monster
+from dice import Dice
+
+
+class MonsterFactory:
+    def __init__(self):
+        with open("json/monster_default_values.json", encoding="utf-8") as f:
+            self.races = json.load(f)
+
+    def create_monster(self, name, race, class_name, monster_level, weapon_name):
+        race_stats = self.races[race]
+
+        m = Monster(name, race, class_name, race_stats["Strength"], (race_stats["Strength"] - 10) // 2,
+                    race_stats["Dexterity"], (race_stats["Dexterity"] - 10) // 2, race_stats["Constitution"],
+                    (race_stats["Constitution"] - 10) // 2, race_stats["Intelligence"],
+                    (race_stats["Intelligence"] - 10) // 2, race_stats["Wisdom"], (race_stats["Wisdom"] - 10) // 2,
+                    race_stats["Charisma"], (race_stats["Charisma"] - 10) // 2,
+                    self._calculate_max_hp(race_stats, monster_level),
+                    base_ac=race_stats["base_ac"], damage_reduction=0, monster_level=monster_level, weapon_name=weapon_name)
+        return m
+
+    @staticmethod
+    def _calculate_max_hp(race_stats, monster_level):
+        hit_die = race_stats["hit_die"]
+        con_modifier = (race_stats["Constitution"] - 10) // 2
+        # Two hit dice, plus one more every two levels so monsters keep pace with
+        # player damage; Constitution counts once per four levels
+        dice_count = 2 + monster_level // 2
+        hp = (monster_level + sum(Dice.roll(hit_die) for _ in range(dice_count))
+              + con_modifier * (1 + monster_level // 4))
+        return max(1, hp)

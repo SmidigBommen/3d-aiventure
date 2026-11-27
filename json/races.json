@@ -1,0 +1,58 @@
+{
+    "Human": {
+        "strength_bonus": 1,
+        "dexterity_bonus": 1,
+        "constitution_bonus": 1,
+        "intelligence_bonus": 1,
+        "wisdom_bonus": 1,
+        "charisma_bonus": 1
+    },
+    "Dwarf": {
+        "strength_bonus": 0,
+        "dexterity_bonus": 0,
+        "constitution_bonus": 2,
+        "intelligence_bonus": 0,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 0
+    },
+    "Elf": {
+        "strength_bonus": 0,
+        "dexterity_bonus": 2,
+        "constitution_bonus": 0,
+        "intelligence_bonus": 0,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 0
+    },
+    "Halfling": {
+        "strength_bonus": 0,
+        "dexterity_bonus": 2,
+        "constitution_bonus": 0,
+        "intelligence_bonus": 0,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 0
+    },
+    "Gnome": {
+        "strength_bonus": 0,
+        "dexterity_bonus": 0,
+        "constitution_bonus": 0,
+        "intelligence_bonus": 2,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 0
+    },
+    "Half-elf": {
+        "strength_bonus": 0,
+        "dexterity_bonus": 0,
+        "constitution_bonus": 0,
+        "intelligence_bonus": 0,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 2
+    },
+    "Half-orc": {
+        "strength_bonus": 2,
+        "dexterity_bonus": 0,
+        "constitution_bonus": 1,
+        "intelligence_bonus": 0,
+        "wisdom_bonus": 0,
+        "charisma_bonus": 0
+    }
+}

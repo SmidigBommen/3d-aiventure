@@ -1,0 +1,762 @@
+"""Session-based game state management for web UI."""
+
+import os
+import sys
+import json
+import uuid
+from pathlib import Path
+from typing import Optional
+from dataclasses import dataclass, field
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from engine.leveling import (  # noqa: E402
+    ABILITY_SCORE_CAP, apply_ability_increases, asi_points_available,
+)
+
+# Path to JSON data files
+JSON_DIR = Path(__file__).parent.parent / "json"
+
+
+def load_json(filename: str) -> dict:
+    """Load a JSON file from the json directory."""
+    with open(JSON_DIR / filename, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# Cached data loaders
+_races_cache = None
+_classes_cache = None
+_weapons_cache = None
+_campaign_cache = None
+
+
+def get_races() -> dict:
+    """Get all playable races with their bonuses."""
+    global _races_cache
+    if _races_cache is None:
+        _races_cache = load_json("races.json")
+    return _races_cache
+
+
+def get_classes() -> dict:
+    """Get all playable classes with their properties."""
+    global _classes_cache
+    if _classes_cache is None:
+        _classes_cache = load_json("classes_properties.json")
+    return _classes_cache
+
+
+def get_weapons() -> dict:
+    """Get all weapons from the catalog."""
+    global _weapons_cache
+    if _weapons_cache is None:
+        _weapons_cache = load_json("weapon-catalog.json")
+    return _weapons_cache
+
+
+def get_campaign() -> dict:
+    """Get the campaign data."""
+    global _campaign_cache
+    if _campaign_cache is None:
+        _campaign_cache = load_json("campaign.json")
+    return _campaign_cache
+
+
+def get_all_weapons_flat() -> dict:
+    """Get all weapons as a flat dictionary."""
+    weapons = get_weapons()
+    flat = {}
+    for category, weapon_list in weapons.items():
+        for name, data in weapon_list.items():
+            flat[name] = {**data, "type": category}
+    return flat
+
+
+_armors_cache = None
+
+
+def get_armors() -> dict:
+    """Get all armors from the catalog."""
+    global _armors_cache
+    if _armors_cache is None:
+        _armors_cache = load_json("armor_catalog.json")
+    return _armors_cache
+
+
+_quests_cache = None
+
+
+def get_quests() -> dict:
+    """Get all quests from the catalog."""
+    global _quests_cache
+    if _quests_cache is None:
+        _quests_cache = load_json("quests.json")
+    return _quests_cache
+
+
+_abilities_cache = None
+
+
+def get_abilities() -> dict:
+    """Get all abilities from the catalog."""
+    global _abilities_cache
+    if _abilities_cache is None:
+        _abilities_cache = load_json("abilities.json")
+    return _abilities_cache
+
+
+_taunts_cache = None
+
+
+def get_monster_taunts() -> dict:
+    """Get all monster taunts."""
+    global _taunts_cache
+    if _taunts_cache is None:
+        _taunts_cache = load_json("monster_taunts.json")
+    return _taunts_cache
+
+
+_portraits_cache = None
+
+
+def get_monster_portraits() -> dict:
+    """Get monster portrait mappings."""
+    global _portraits_cache
+    if _portraits_cache is None:
+        _portraits_cache = load_json("monster_portraits.json")
+    return _portraits_cache
+
+
+_battle_sprites_cache = None
+
+
+def get_battle_sprites() -> dict:
+    """Sprite sheets for the battle stage ({sheet, scale}): players by portrait, monsters by race,
+    bosses by boss id, plus backdrops."""
+    global _battle_sprites_cache
+    if _battle_sprites_cache is None:
+        _battle_sprites_cache = load_json("battle_sprites.json")
+    return _battle_sprites_cache
+
+
+_shopkeeper_cache = None
+
+
+def get_shopkeeper() -> dict:
+    """Get shopkeeper dialog data."""
+    global _shopkeeper_cache
+    if _shopkeeper_cache is None:
+        _shopkeeper_cache = load_json("shopkeeper.json")
+    return _shopkeeper_cache
+
+
+_shop_inventory_cache = None
+
+
+def get_default_shop_inventory() -> list:
+    """Get default shop inventory."""
+    global _shop_inventory_cache
+    if _shop_inventory_cache is None:
+        _shop_inventory_cache = load_json("shop_inventory.json")
+    return _shop_inventory_cache
+
+
+_bosses_cache = None
+
+
+def get_bosses() -> dict:
+    """Get boss definitions keyed by the boss id used in campaign.json areas."""
+    global _bosses_cache
+    if _bosses_cache is None:
+        _bosses_cache = load_json("bosses.json")
+    return _bosses_cache
+
+
+_monster_abilities_cache = None
+
+
+def get_monster_abilities() -> dict:
+    """Get monster special abilities: {"races": {race: [ids]}, "abilities": {id: def}}."""
+    global _monster_abilities_cache
+    if _monster_abilities_cache is None:
+        _monster_abilities_cache = load_json("monster_abilities.json")
+    return _monster_abilities_cache
+
+
+_events_cache = None
+
+
+def get_events() -> dict:
+    """Get exploration event definitions."""
+    global _events_cache
+    if _events_cache is None:
+        _events_cache = load_json("events.json")
+    return _events_cache
+
+
+def get_class_abilities(class_name: str, level: int) -> list:
+    """Get unlocked abilities for a class at a given level."""
+    abilities = get_abilities()
+    result = []
+    for ability_id, ability in abilities.items():
+        if class_name in ability.get("classes", []) and level >= ability.get("unlock_level", 1):
+            result.append({"id": ability_id, **ability})
+    result.sort(key=lambda a: (a["cost"], a["unlock_level"]))
+    return result
+
+
+def calculate_max_pp(class_name: str, level: int, primary_modifier: int) -> int:
+    """Calculate max power points for a class. Delegates to engine."""
+    from engine.leveling import calculate_max_pp as _calc
+    return _calc(class_name, level, primary_modifier)
+
+
+def get_primary_modifier(character) -> int:
+    """Get the primary ability modifier for a character."""
+    classes = get_classes()
+    class_data = classes.get(character.class_name, {})
+    primary = class_data.get("primary_ability", "Strength").lower()
+    return getattr(character, f"{primary}_modifier", 0)
+
+
+def get_save_modifiers(character) -> dict:
+    """Total saving throw modifier per ability: {"strength": int, ...}.
+
+    Adds the proficiency bonus for the class's proficient saves.
+    """
+    proficient = get_classes().get(character.class_name, {}).get("saving_throw_proficiencies", [])
+    mods = {}
+    for ability in ("Strength", "Dexterity", "Constitution", "Intelligence", "Wisdom", "Charisma"):
+        mod = getattr(character, f"{ability.lower()}_modifier", 0)
+        if ability in proficient:
+            mod += character.proficiency_bonus
+        mods[ability.lower()] = mod
+    return mods
+
+
+def get_all_armors_flat() -> dict:
+    """Get all armors as a flat dictionary."""
+    armors = get_armors()
+    flat = {}
+    for category, armor_list in armors.items():
+        for name, data in armor_list.items():
+            flat[name] = {**data, "type": category}
+    return flat
+
+
+# Number of battle log lines kept in the session and shown in the arena
+BATTLE_LOG_LIMIT = 16
+
+# Healing by potion name, for saves written before potions stored healing_amount
+LEGACY_POTION_HEALING = {
+    "Minor Healing Potion": 5,
+    "Small Healing Potion": 10,
+    "Healing Potion": 10,
+    "Medium Healing Potion": 25,
+    "Greater Healing Potion": 20,
+    "Superior Healing Potion": 50,
+}
+
+
+@dataclass
+class CharacterCreationState:
+    """Tracks character creation progress."""
+    race: Optional[str] = None
+    class_name: Optional[str] = None
+    name: Optional[str] = None
+    weapon: Optional[str] = None
+    armor: Optional[str] = None
+    portrait: Optional[str] = None
+    skills: list = field(default_factory=list)
+
+
+@dataclass
+class BattleState:
+    """Tracks current battle state."""
+    monster: "CombatantState" = None
+    round_count: int = 0
+    initiative_order: list = field(default_factory=list)
+    battle_log: list = field(default_factory=list)
+    is_player_turn: bool = True
+    is_active: bool = False
+    player_effects: list = field(default_factory=list)
+    turn_events: list = field(default_factory=list)   # what the last turn did (engine/turn_events.py)
+    turn_seq: int = 0                                 # goes up every turn; the UI plays each seq once
+
+    def __post_init__(self):
+        if self.monster is None:
+            from engine.combatant import CombatantState
+            self.monster = CombatantState()
+
+    # --- Backward-compatible properties for gradual migration ---
+    # These let existing code read battle.monster_name etc. without changes.
+    @property
+    def monster_name(self): return self.monster.name
+    @property
+    def monster_race(self): return self.monster.race
+    @property
+    def monster_level(self): return self.monster.level
+    @property
+    def monster_hp(self): return self.monster.hp
+    @monster_hp.setter
+    def monster_hp(self, value): self.monster.hp = value
+    @property
+    def monster_max_hp(self): return self.monster.max_hp
+    @property
+    def monster_ac(self): return self.monster.ac
+    @monster_ac.setter
+    def monster_ac(self, value): self.monster.ac = value
+    @property
+    def monster_base_ac(self): return self.monster.base_ac
+    @property
+    def monster_dex_modifier(self): return self.monster.dex_mod
+    @property
+    def monster_str_modifier(self): return self.monster.str_mod
+    @property
+    def monster_proficiency_bonus(self): return self.monster.proficiency
+    @property
+    def monster_weapon_name(self): return self.monster.weapon.name
+    @property
+    def monster_weapon_damage_die(self): return self.monster.weapon.damage_die
+    @property
+    def monster_weapon_damage_dice_count(self): return self.monster.weapon.damage_dice_count
+    @property
+    def monster_weapon_properties(self): return self.monster.weapon.properties
+    @property
+    def monster_effects(self): return self.monster.effects
+    @monster_effects.setter
+    def monster_effects(self, value): self.monster.effects = value
+
+
+class GameSession:
+    """Manages a single game session."""
+
+    def __init__(self, session_id: str = None):
+        self.session_id = session_id or str(uuid.uuid4())
+        self.character = None
+        self.character_creation = CharacterCreationState()
+        self.battle = BattleState()
+        self.current_location = None
+        self.current_area = None
+        self.act = None
+        self.monster_kills = 0
+        self.kills_at_last_restock = 0
+        self.active_quests = {}       # {quest_id: {"progress": int, "status": "active"|"ready"}}
+        self.completed_quests = []    # [quest_id, ...]
+        # Shop state (previously in request.session)
+        self.shop_inventory = None    # None = needs initialization
+        self.haggled_items = {}
+        self.haggle_result = None
+        # Battle reward display (previously in request.session)
+        self.battle_rewards = None
+        # Campaign progression — acts/shards are derived from this (see engine/campaign.py)
+        self.defeated_bosses = []     # [boss_id, ...] in the order they fell
+        # Exploration events
+        self.pending_event = None     # event id awaiting the player's choice
+        self.event_result = None      # result dict of the last resolved event (shown once)
+        self.completed_events = []    # ids of one-time events already resolved
+        self.events_resolved = 0      # lifetime counter for the journal
+        # Flash messages (one-time display, cleared after read)
+        self._flash = {}
+
+    def set_flash(self, key: str, value):
+        """Set a flash message (displayed once, then cleared)."""
+        self._flash[key] = value
+
+    def pop_flash(self, key: str, default=None):
+        """Pop a flash message (returns and removes it)."""
+        return self._flash.pop(key, default)
+
+    def to_dict(self) -> dict:
+        """Serialize session to dictionary for storage."""
+        location_name = self.current_location.get("name") if self.current_location else None
+        area_id = self.current_area.get("id") if self.current_area else None
+        act_num = self.act.get("number") if self.act else 1
+
+        return {
+            "session_id": self.session_id,
+            "character": self.serialize_character(),
+            "character_creation": {
+                "race": self.character_creation.race,
+                "class_name": self.character_creation.class_name,
+                "name": self.character_creation.name,
+                "weapon": self.character_creation.weapon,
+                "armor": self.character_creation.armor,
+                "portrait": self.character_creation.portrait,
+                "skills": self.character_creation.skills,
+            },
+            "battle": {
+                "monster": self.battle.monster.to_dict(),
+                "round_count": self.battle.round_count,
+                "initiative_order": self.battle.initiative_order,
+                "battle_log": self.battle.battle_log[-BATTLE_LOG_LIMIT:],
+                "is_player_turn": self.battle.is_player_turn,
+                "is_active": self.battle.is_active,
+                "player_effects": self.battle.player_effects,
+                "turn_events": self.battle.turn_events,
+                "turn_seq": self.battle.turn_seq,
+            },
+            "location_name": location_name,
+            "area_id": area_id,
+            "act_num": act_num,
+            "monster_kills": self.monster_kills,
+            "kills_at_last_restock": self.kills_at_last_restock,
+            "active_quests": self.active_quests,
+            "completed_quests": self.completed_quests,
+            "shop_inventory": self.shop_inventory,
+            "haggled_items": self.haggled_items,
+            "haggle_result": self.haggle_result,
+            "battle_rewards": self.battle_rewards,
+            "defeated_bosses": self.defeated_bosses,
+            "pending_event": self.pending_event,
+            "event_result": self.event_result,
+            "completed_events": self.completed_events,
+            "events_resolved": self.events_resolved,
+            "_flash": self._flash,
+        }
+
+    def _get_weapon_name(self, c) -> Optional[str]:
+        """Get the weapon name from character, handling enum keys."""
+        from character import WeaponSlot
+        weapon = c.weapon_slots.get(WeaponSlot.MAIN_HAND)
+        return weapon.name if weapon else None
+
+    def _get_armor_name(self, c) -> Optional[str]:
+        """Get the armor name from character, handling enum keys."""
+        from equipmentType import EquipmentType
+        armor = c.equipment.get(EquipmentType.ARMOR)
+        return armor.name if armor else None
+
+    def serialize_character(self) -> Optional[dict]:
+        """Serialize character object to dict."""
+        if not self.character:
+            return None
+        from weapon import Weapon
+        from armor import Armor
+        from items import QuestItem
+        from character import WeaponSlot
+        from equipmentType import EquipmentType
+        c = self.character
+
+        # Build weapon details
+        equipped_weapon = c.weapon_slots.get(WeaponSlot.MAIN_HAND)
+        weapon_details = None
+        if equipped_weapon:
+            weapon_details = {
+                "name": equipped_weapon.name,
+                "damage_die": equipped_weapon.damage_die,
+                "damage_dice_count": equipped_weapon.damage_dice_count,
+                "damage_type": equipped_weapon.damage_type,
+                "category": equipped_weapon.category,
+                "properties": equipped_weapon.properties,
+            }
+
+        # Build armor details
+        equipped_armor = c.equipment.get(EquipmentType.ARMOR)
+        armor_details = None
+        if equipped_armor:
+            armor_details = {
+                "name": equipped_armor.name,
+                "base_ac": equipped_armor.base_ac,
+                "category": equipped_armor.category,
+            }
+
+        # Build enriched inventory
+        inventory = []
+        for item in c.inventory:
+            entry = {
+                "name": item.name,
+                "description": getattr(item, 'description', ''),
+            }
+            if isinstance(item, QuestItem):
+                entry["type"] = "quest_item"
+                entry["quest_id"] = item.quest_id
+            elif isinstance(item, Weapon):
+                entry["type"] = "weapon"
+                entry["damage_die"] = item.damage_die
+                entry["damage_dice_count"] = item.damage_dice_count
+                entry["damage_type"] = item.damage_type
+                entry["category"] = item.category
+                entry["properties"] = item.properties
+            elif isinstance(item, Armor):
+                entry["type"] = "armor"
+                entry["base_ac"] = item.base_ac
+                entry["category"] = item.category
+            else:
+                entry["type"] = "potion"
+                entry["healing_amount"] = getattr(item, "healing_amount", 10)
+            inventory.append(entry)
+
+        return {
+            "name": c.name,
+            "race": c.race,
+            "class_name": c.class_name,
+            "level": c.level,
+            "xp": c.xp,
+            "xp_to_next_level": c.calculate_xp_to_next_level(),
+            "gold": c.gold,
+            "current_hit_points": c.current_hit_points,
+            "max_hit_points": c.max_hit_points,
+            "armor_class": c.armor_class,
+            "strength_score": c.strength_score,
+            "strength_modifier": c.strength_modifier,
+            "dexterity_score": c.dexterity_score,
+            "dexterity_modifier": c.dexterity_modifier,
+            "constitution_score": c.constitution_score,
+            "constitution_modifier": c.constitution_modifier,
+            "intelligence_score": c.intelligence_score,
+            "intelligence_modifier": c.intelligence_modifier,
+            "wisdom_score": c.wisdom_score,
+            "wisdom_modifier": c.wisdom_modifier,
+            "charisma_score": c.charisma_score,
+            "charisma_modifier": c.charisma_modifier,
+            "weapon": self._get_weapon_name(c),
+            "armor": self._get_armor_name(c),
+            "weapon_details": weapon_details,
+            "armor_details": armor_details,
+            "inventory": inventory,
+            "power_points": c.power_points,
+            "max_power_points": c.max_power_points,
+            "active_effects": c.active_effects,
+            "ability_increases": dict(c.ability_increases),
+            "asi_points": asi_points_available(c),
+            "ability_score_cap": ABILITY_SCORE_CAP,
+            "portrait": self.character_creation.portrait,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "GameSession":
+        """Deserialize session from dictionary."""
+        session = cls(data.get("session_id"))
+        session.monster_kills = data.get("monster_kills", 0)
+        session.kills_at_last_restock = data.get("kills_at_last_restock", 0)
+        session.active_quests = data.get("active_quests", {})
+        session.completed_quests = data.get("completed_quests", [])
+        session.shop_inventory = data.get("shop_inventory")
+        session.haggled_items = data.get("haggled_items", {})
+        session.haggle_result = data.get("haggle_result")
+        session.battle_rewards = data.get("battle_rewards")
+        session.defeated_bosses = data.get("defeated_bosses", [])
+        session.pending_event = data.get("pending_event")
+        session.event_result = data.get("event_result")
+        session.completed_events = data.get("completed_events", [])
+        session.events_resolved = data.get("events_resolved", 0)
+        session._flash = data.get("_flash", {})
+
+        # Restore location from campaign data
+        campaign = get_campaign()
+        act_num = data.get("act_num", 1)
+        location_name = data.get("location_name")
+        area_id = data.get("area_id")
+
+        # Find the act
+        for act in campaign.get("acts", []):
+            if act.get("number") == act_num:
+                session.act = act
+                break
+        if not session.act and campaign.get("acts"):
+            session.act = campaign["acts"][0]
+
+        # Find the location
+        if session.act and location_name:
+            for loc in session.act.get("locations", []):
+                if loc.get("name") == location_name:
+                    session.current_location = loc
+                    break
+
+        # Find the area
+        if session.current_location and area_id:
+            for area in session.current_location.get("areas", []):
+                if area.get("id") == area_id:
+                    session.current_area = area
+                    break
+
+        # Restore character creation state
+        cc_data = data.get("character_creation", {})
+        session.character_creation = CharacterCreationState(
+            race=cc_data.get("race"),
+            class_name=cc_data.get("class_name"),
+            name=cc_data.get("name"),
+            weapon=cc_data.get("weapon"),
+            armor=cc_data.get("armor"),
+            portrait=cc_data.get("portrait"),
+            skills=cc_data.get("skills", []),
+        )
+
+        # Restore battle state
+        from engine.combatant import CombatantState
+        battle_data = data.get("battle", {})
+
+        # Support both new format (nested "monster" dict) and legacy (flat fields)
+        monster_data = battle_data.get("monster")
+        if monster_data and isinstance(monster_data, dict) and "name" in monster_data:
+            monster = CombatantState.from_dict(monster_data)
+        else:
+            # Legacy format: reconstruct from flat fields
+            from engine.combatant import WeaponState
+            monster = CombatantState(
+                name=battle_data.get("monster_name", ""),
+                race=battle_data.get("monster_race", ""),
+                level=battle_data.get("monster_level", 1),
+                hp=battle_data.get("monster_hp", 0),
+                max_hp=battle_data.get("monster_max_hp", 0),
+                ac=battle_data.get("monster_ac", 10),
+                base_ac=battle_data.get("monster_base_ac", 10),
+                str_mod=battle_data.get("monster_str_modifier", 0),
+                dex_mod=battle_data.get("monster_dex_modifier", 0),
+                proficiency=battle_data.get("monster_proficiency_bonus", 1),
+                weapon=WeaponState(
+                    name=battle_data.get("monster_weapon_name", ""),
+                    damage_die=battle_data.get("monster_weapon_damage_die", 6),
+                    damage_dice_count=battle_data.get("monster_weapon_damage_dice_count", 1),
+                    properties=battle_data.get("monster_weapon_properties", []),
+                ),
+                effects=battle_data.get("monster_effects", []),
+            )
+
+        session.battle = BattleState(
+            monster=monster,
+            round_count=battle_data.get("round_count", 0),
+            initiative_order=battle_data.get("initiative_order", []),
+            battle_log=battle_data.get("battle_log", []),
+            is_player_turn=battle_data.get("is_player_turn", True),
+            is_active=battle_data.get("is_active", False),
+            player_effects=battle_data.get("player_effects", []),
+            turn_events=battle_data.get("turn_events", []),
+            turn_seq=battle_data.get("turn_seq", 0),
+        )
+
+        # Restore character if creation data exists
+        char_data = data.get("character")
+        if char_data and cc_data.get("name"):
+            session.character = session._restore_character(char_data, cc_data)
+
+        return session
+
+    def _restore_character(self, char_data: dict, cc_data: dict):
+        """Restore a character object from serialized data."""
+        try:
+            from characterFactory import CharacterFactory
+            from weaponFactory import WeaponFactory
+            from items import HealingPotion, QuestItem
+            from character import WeaponSlot
+
+            # Recreate character using factory
+            factory = CharacterFactory()
+            character = factory.create_character(
+                name=cc_data["name"],
+                race=cc_data["race"],
+                class_name=cc_data["class_name"]
+            )
+
+            # Restore state
+            apply_ability_increases(character, char_data.get("ability_increases"))
+            character.level = char_data.get("level", 1)
+            character.xp = char_data.get("xp", 0)
+            character.gold = char_data.get("gold", 0)
+            character.current_hit_points = char_data.get("current_hit_points", character.max_hit_points)
+            character.max_hit_points = char_data.get("max_hit_points", character.max_hit_points)
+            character.armor_class = char_data.get("armor_class", character.armor_class)
+            character.xp_to_next_level = character.level * 150
+            character.update_proficiency_bonus()
+
+            # Restore power points
+            primary_mod = get_primary_modifier(character)
+            character.max_power_points = calculate_max_pp(character.class_name, character.level, primary_mod)
+            character.power_points = char_data.get("power_points", character.max_power_points)
+            character.active_effects = char_data.get("active_effects", [])
+
+            # Create factories (needed for equipped items and inventory restoration)
+            weapon_factory = WeaponFactory()
+            from armorFactory import ArmorFactory
+            armor_factory = ArmorFactory()
+
+            # Restore weapon (use enum, not string)
+            if cc_data.get("weapon"):
+                try:
+                    weapon = weapon_factory.get_weapon_by_name(cc_data["weapon"])
+                    character.equip_weapon(weapon, WeaponSlot.MAIN_HAND)
+                except ValueError:
+                    pass
+
+            # Restore armor
+            if cc_data.get("armor"):
+                try:
+                    armor = armor_factory.get_armor_by_name(cc_data["armor"])
+                    character.equip(armor)
+                except ValueError:
+                    pass
+
+            # AC is derived from scores and armor, never trusted from the save
+            character.update_ac()
+
+            # Restore skills
+            for skill in cc_data.get("skills", []):
+                character.add_skill_proficiency(skill)
+
+            # Restore inventory
+            character.inventory = []
+            for item_data in char_data.get("inventory", []):
+                item_type = item_data.get("type", "potion")
+                if item_type == "weapon":
+                    try:
+                        weapon = weapon_factory.get_weapon_by_name(item_data["name"])
+                        character.add_item(weapon)
+                    except ValueError:
+                        pass
+                elif item_type == "armor":
+                    try:
+                        armor = armor_factory.get_armor_by_name(item_data["name"])
+                        character.add_item(armor)
+                    except ValueError:
+                        pass
+                elif item_type == "quest_item":
+                    quest_id = item_data.get("quest_id", "")
+                    character.add_item(QuestItem(item_data["name"], item_data.get("description", ""), quest_id))
+                elif "Healing Potion" in item_data["name"]:
+                    healing = item_data.get("healing_amount")
+                    if healing is None:
+                        # Saves from before healing_amount was stored: infer from the name
+                        healing = LEGACY_POTION_HEALING.get(item_data["name"], 10)
+                    character.add_item(HealingPotion(item_data["name"], healing))
+
+            return character
+        except (KeyError, ValueError, AttributeError) as e:
+            print(f"Error restoring character: {e}")
+            return None
+
+
+SESSIONS_DIR = Path(os.environ["AIVENTURE_DATA"]) / "sessions" if os.environ.get("AIVENTURE_DATA") else Path(__file__).parent / "sessions"
+
+
+def _session_file(session_id: str) -> Path:
+    """Get the file path for a session."""
+    # Sanitize session_id to prevent path traversal
+    safe_id = "".join(c for c in session_id if c.isalnum() or c == "-")
+    return SESSIONS_DIR / f"{safe_id}.json"
+
+
+def get_session(request) -> GameSession:
+    """Get or create a GameSession. Loads from server-side file."""
+    session_id = request.session.get("session_id")
+    if session_id:
+        path = _session_file(session_id)
+        if path.exists():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                return GameSession.from_dict(data)
+            except (json.JSONDecodeError, OSError):
+                pass
+    return GameSession()
+
+
+def save_session(request, session: GameSession):
+    """Save GameSession to server-side file. Cookie stores only the session ID."""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _session_file(session.session_id)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(session.to_dict(), f)
+    request.session["session_id"] = session.session_id

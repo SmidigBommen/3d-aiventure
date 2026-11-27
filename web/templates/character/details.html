@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="steps">
+    <div class="step completed"><span class="step-num">1</span><span class="step-label">Race</span></div>
+    <div class="step-line done"></div>
+    <div class="step completed"><span class="step-num">2</span><span class="step-label">Class</span></div>
+    <div class="step-line done"></div>
+    <div class="step active"><span class="step-num">3</span><span class="step-label">Details</span></div>
+    <div class="step-line"></div>
+    <div class="step"><span class="step-num">4</span><span class="step-label">Summary</span></div>
+</div>
+
+<h1 class="page-title">Character Details</h1>
+<p class="page-subtitle">Name your character and choose your starting equipment.</p>
+
+<div class="panel char-preview">
+    <h2 class="panel-title">{{ race }} {{ class_name }}</h2>
+    <div class="stats-grid">
+        {% for s in preview.scores %}
+        <div class="stat-box{% if s.primary %} stat-primary{% endif %}">
+            <span class="label">{{ s.name | capitalize }}</span>
+            <span class="value">{{ s.score }}</span>
+            <span class="modifier">{{ '%+d' % s.modifier }}</span>
+            {% if s.primary %}<span class="stat-tag">Primary</span>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    <div class="char-preview-vitals">
+        <span><strong>{{ preview.hit_points }}</strong> hit points</span>
+        <span><strong>{{ preview.power_points }}</strong> power points</span>
+        <span><strong id="preview-ac" data-default="{{ preview.unarmored_ac }}">{{ preview.unarmored_ac }}</strong> armor class</span>
+        <span>Starts with <strong>{{ preview.starting_abilities | join(', ') }}</strong></span>
+    </div>
+</div>
+
+<form action="/character/create" method="post" id="details-form">
+    <div class="form-section">
+        <h2>Character Name</h2>
+        <div class="form-group">
+            <label for="name">Enter your character's name:</label>
+            <input type="text" id="name" name="name" required placeholder="Enter name..." maxlength="30">
+        </div>
+    </div>
+
+    <div class="form-section">
+        <h2>Portrait</h2>
+        <p class="hint">Choose your character's appearance.</p>
+        <div class="portrait-grid">
+            <label class="portrait-option">
+                <input type="radio" name="portrait" value="/static/images/player_fighter.png" required>
+                <img src="/static/images/player_fighter.png" alt="Fighter" class="portrait-choice">
+                <span class="portrait-label">Knight</span>
+            </label>
+            <label class="portrait-option">
+                <input type="radio" name="portrait" value="/static/images/player_berserker.png">
+                <img src="/static/images/player_berserker.png" alt="Berserker" class="portrait-choice">
+                <span class="portrait-label">Berserker</span>
+            </label>
+            <label class="portrait-option">
+                <input type="radio" name="portrait" value="/static/images/player_wizard.png">
+                <img src="/static/images/player_wizard.png" alt="Wizard" class="portrait-choice">
+                <span class="portrait-label">Wizard</span>
+            </label>
+        </div>
+    </div>
+
+    <div class="form-section">
+        <h2>Starting Weapon</h2>
+        <p class="hint">Choose a weapon from those available to your class.</p>
+
+        <div class="equip-grid">
+            {% for weapon in weapons %}
+            <label class="equip-card">
+                <input type="radio" name="weapon" value="{{ weapon.name }}" required>
+                <div class="equip-card-inner">
+                    <h3>{{ weapon.name }}</h3>
+                    <div class="equip-meta">
+                        <span class="equip-damage">1d{{ weapon.damage_die }} {{ weapon.damage_type }}</span>
+                        <span class="equip-category">{{ weapon.category }}</span>
+                    </div>
+                    <p class="equip-props">{{ weapon.properties }}</p>
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+    </div>
+
+    {% if armors %}
+    <div class="form-section">
+        <h2>Starting Armor</h2>
+        <p class="hint">Choose armor from those available to your class.</p>
+
+        <div class="equip-grid">
+            <label class="equip-card">
+                <input type="radio" name="armor" value="" checked data-ac="{{ preview.unarmored_ac }}">
+                <div class="equip-card-inner">
+                    <h3>No Armor</h3>
+                    <div class="equip-meta">
+                        <span class="equip-damage">AC {{ preview.unarmored_ac }}</span>
+                        <span class="equip-category">Unarmored</span>
+                    </div>
+                    <p class="equip-props">No stealth penalty</p>
+                </div>
+            </label>
+            {% for armor in armors %}
+            <label class="equip-card">
+                <input type="radio" name="armor" value="{{ armor.name }}" data-ac="{{ armor.total_ac }}">
+                <div class="equip-card-inner">
+                    <h3>{{ armor.name }}</h3>
+                    <div class="equip-meta">
+                        <span class="equip-damage" title="Base {{ armor.base_ac }}{% if armor.category == 'Light' %} + DEX{% elif armor.category == 'Medium' %} + DEX (max 2){% endif %}">AC {{ armor.total_ac }}</span>
+                        <span class="equip-category">{{ armor.category }}</span>
+                    </div>
+                    <p class="equip-props">{{ armor.weight }} lb{% if armor.stealth_disadvantage %} | Stealth disadvantage{% endif %}</p>
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="form-section" data-max-skills="{{ num_skills }}">
+        <h2>Skill Proficiencies</h2>
+        <p class="hint">Choose {{ num_skills }} skills to be proficient in.</p>
+
+        <div class="skill-grid">
+            {% for skill in skill_choices %}
+            <label class="skill-option">
+                <input type="checkbox" name="skills" value="{{ skill }}" class="skill-checkbox">
+                <span class="skill-name">{{ skill }}</span>
+            </label>
+            {% endfor %}
+        </div>
+        <p class="skill-counter">Selected: <strong><span id="skill-count">0</span> / {{ num_skills }}</strong></p>
+    </div>
+
+    <div class="btn-group mt-3">
+        <a href="/character/class" class="btn btn-secondary">Back</a>
+        <button type="submit" class="btn btn-primary" id="create-btn">Create Character</button>
+    </div>
+</form>
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="steps">
+    <div class="step completed"><span class="step-num">1</span><span class="step-label">Race</span></div>
+    <div class="step-line done"></div>
+    <div class="step active"><span class="step-num">2</span><span class="step-label">Class</span></div>
+    <div class="step-line"></div>
+    <div class="step"><span class="step-num">3</span><span class="step-label">Details</span></div>
+    <div class="step-line"></div>
+    <div class="step"><span class="step-num">4</span><span class="step-label">Summary</span></div>
+</div>
+
+<h1 class="page-title">Choose Your Class</h1>
+<p class="page-subtitle">Your class determines your combat abilities, skills, and playstyle.</p>
+
+<form action="/character/class" method="post" id="class-form">
+    <input type="hidden" name="class_name" id="selected-value" value="">
+
+    <div class="selection-grid">
+        {% for cls in classes %}
+        <div class="selection-card" data-value="{{ cls.name }}">
+            <h3>{{ cls.name }}</h3>
+            {% if cls.playstyle %}<p class="class-playstyle">{{ cls.playstyle }}</p>{% endif %}
+            <div class="class-info-row">
+                <span class="label">Hit Die:</span>
+                <span class="value">d{{ cls.hit_die }}</span>
+            </div>
+            <div class="class-info-row">
+                <span class="label">Primary:</span>
+                <span class="value">{{ cls.primary_ability }}</span>
+            </div>
+            {% if cls.ability_bonuses %}
+            <div class="class-info-row">
+                <span class="label">Training:</span>
+                <span class="value small">{{ cls.ability_bonuses }}</span>
+            </div>
+            {% endif %}
+            <div class="class-info-row">
+                <span class="label">Saves:</span>
+                <span class="value small">{{ cls.saving_throws }}</span>
+            </div>
+            <div class="class-info-row">
+                <span class="label">Skills:</span>
+                <span class="value">Choose {{ cls.num_skills }}</span>
+            </div>
+            <div class="class-info-row">
+                <span class="label">Armor:</span>
+                <span class="value small">{{ cls.armor }}</span>
+            </div>
+            {% if cls.abilities %}
+            <div class="class-abilities">
+                <span class="class-abilities-title">Abilities</span>
+                <ul>
+                    {% for ability in cls.abilities %}
+                    <li title="{{ ability.description }}">
+                        <span class="class-ability-level">Lv {{ ability.unlock_level }}</span>
+                        <span class="class-ability-name">{{ ability.name }}</span>
+                        <span class="class-ability-cost">{% if ability.cost %}{{ ability.cost }} PP{% else %}Free{% endif %}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="btn-group mt-3">
+        <a href="/character/new" class="btn btn-secondary">Back</a>
+        <button type="submit" class="btn btn-primary" id="continue-btn" disabled>Continue</button>
+    </div>
+</form>
+{% endblock %}

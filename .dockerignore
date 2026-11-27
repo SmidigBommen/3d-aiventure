@@ -1,0 +1,12 @@
+.git
+.venv
+node_modules
+client/dist
+web/sessions
+web/saves
+data
+test
+holdout
+tools
+__pycache__
+**/__pycache__
