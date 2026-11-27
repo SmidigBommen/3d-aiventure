@@ -223,9 +223,12 @@ def contents_view(session: GameSession):
 
 def world_state(session: GameSession) -> dict:
     """What the 3D client needs to show the place the character stands in."""
+    # Imported here: web.shop is imported by web.fight, which imports this module.
+    from web.shop import tracked_quests
+
     if not session.character:
         return {"has_character": False, "character": None, "location": None, "area": None,
-                "exits": [], "pending": None, "asi_points": 0}
+                "exits": [], "pending": None, "asi_points": 0, "quests": []}
 
     serialized = session.serialize_character()
     location = session.current_location
@@ -259,4 +262,5 @@ def world_state(session: GameSession) -> dict:
         "pending": pending(session),
         "contents": contents_view(session) if area else None,
         "asi_points": serialized["asi_points"],
+        "quests": tracked_quests(session),
     }

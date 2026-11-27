@@ -4,6 +4,7 @@ import type { BattleAction, BattleView } from './battle/view';
 import type { AreaContents } from './world/contents';
 import type { EventResult, EventView } from './world/event';
 import type { InventoryView, ItemActionKind, SheetView } from './world/sheet';
+import type { HaggleResult, ShopView, TrackedQuest } from './world/shop';
 
 export type Danger = 'safe' | 'low' | 'med' | 'high';
 
@@ -38,6 +39,7 @@ export interface WorldState {
   pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
   contents?: AreaContents | null; // what the area holds; null until the server has rolled it
   asi_points?: number; // ability score points not yet spent
+  quests?: TrackedQuest[]; // the active quests, for the tracker
 }
 
 export type MoveAnswer = { ok: true; state: WorldState } | { ok: false; error: string; message: string };
@@ -48,7 +50,8 @@ export async function fetchState(): Promise<WorldState> {
   return (await response.json()) as WorldState;
 }
 
-type Refusal = { ok: false; error: string; message: string };
+/** `dialog`: the line the shopkeeper has for the refusal, when she has one. */
+type Refusal = { ok: false; error: string; message: string; dialog?: { context: string; line: string } | null };
 
 async function post<T>(path: string, body?: unknown): Promise<{ ok: true; value: T } | Refusal> {
   try {
@@ -60,7 +63,7 @@ async function post<T>(path: string, body?: unknown): Promise<{ ok: true; value:
     });
     const answer = await response.json();
     if (response.ok) return { ok: true, value: answer as T };
-    return { ok: false, error: String(answer.error), message: String(answer.message) };
+    return { ok: false, error: String(answer.error), message: String(answer.message), dialog: answer.dialog ?? null };
   } catch {
     return { ok: false, error: 'network', message: 'The server did not answer.' };
   }
@@ -158,6 +161,38 @@ export async function postImprove(ability: string): Promise<CharacterAnswer> {
 /** Resting where the area allows it. */
 export async function postRest(): Promise<CharacterAnswer> {
   return asCharacter(await post<CharacterBody>('/api/rest'));
+}
+
+// --- Elara's shop and the quests ---
+
+type ShopBody = { shop: ShopView; state: WorldState; message: string | null; haggle: HaggleResult | null };
+export type ShopAnswer = ({ ok: true } & ShopBody) | Refusal;
+/** The actions of the shop panel: the first three take the index of a ware or backpack entry, the others a quest id. */
+export type ShopActionKind = 'buy' | 'sell' | 'haggle' | 'accept' | 'turn-in' | 'abandon';
+
+const asShop = (answer: { ok: true; value: ShopBody } | Refusal): ShopAnswer =>
+  (answer.ok ? { ok: true, shop: answer.value.shop, state: answer.value.state, message: answer.value.message ?? null, haggle: answer.value.haggle ?? null } : answer);
+
+/** The shop as it stands. */
+export async function fetchShop(): Promise<ShopAnswer> {
+  try {
+    const response = await fetch('/api/shop', { credentials: 'same-origin', cache: 'no-store' });
+    const answer = await response.json();
+    if (response.ok) return asShop({ ok: true, value: answer as ShopBody });
+    return { ok: false, error: String(answer.error), message: String(answer.message) };
+  } catch {
+    return { ok: false, error: 'network', message: 'The server did not answer.' };
+  }
+}
+
+/** Buying, selling or haggling over the entry with this index. */
+export async function postShopItem(action: 'buy' | 'sell' | 'haggle', itemIndex: number): Promise<ShopAnswer> {
+  return asShop(await post<ShopBody>(`/api/shop/${action}`, { item_index: itemIndex }));
+}
+
+/** Accepting, turning in or abandoning the quest with this id. */
+export async function postShopQuest(action: 'accept' | 'turn-in' | 'abandon', questId: string): Promise<ShopAnswer> {
+  return asShop(await post<ShopBody>(`/api/shop/quest/${action}`, { quest_id: questId }));
 }
 
 // --- the fight ---

@@ -211,3 +211,57 @@ h2 { font-size: 1.6rem; margin-bottom: 1rem; }
 #boss-intro { border-color: rgba(239, 83, 80, 0.6); }
 #boss-intro h2 { font-size: 2rem; margin-bottom: 0.2rem; }
 #boss-intro-title { margin: 0 0 1rem; font-style: italic; opacity: 0.85; }
+
+/* Elara's shop and the quests */
+#hud-quests { top: 1rem; right: 1rem; max-width: 20rem; font-size: 0.95rem; }
+#hud-quests::before { content: 'Quests'; display: block; margin-bottom: 0.2rem; font-family: var(--heading); font-size: 0.85rem; letter-spacing: 0.08em; color: var(--gold); }
+.quest-line.ready { color: var(--gold); }
+#hud-quest-ready { bottom: 7.4rem; left: 1rem; border-color: var(--gold); color: var(--gold); font-family: var(--heading); font-size: 0.95rem; letter-spacing: 0.04em; }
+#hud.in-battle #hud-quest-ready { display: none; }
+.shop-head { display: flex; align-items: center; gap: 1rem; }
+#shop-portrait { width: 5.5rem; height: 5.5rem; object-fit: cover; border-radius: 50%; border: 2px solid var(--gold); }
+.shop-keeper { flex: 1; }
+.shop-keeper h2 { text-align: left; margin: 0; }
+#shop-title { margin: 0; font-size: 0.9rem; opacity: 0.8; }
+#shop-dialog { margin: 0.4rem 0 0; font-style: italic; line-height: 1.35; }
+#shop-gold { align-self: flex-start; padding: 0.25rem 0.8rem; border: 1px solid var(--gold); border-radius: 999px; color: var(--gold); font-family: var(--heading); white-space: nowrap; }
+.shop-tabs { display: flex; gap: 0.4rem; margin: 0.9rem 0 0.7rem; border-bottom: 1px solid rgba(212, 169, 74, 0.3); }
+.shop-tab { padding: 0.4rem 1.1rem; border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: transparent; color: var(--ink); font: inherit; font-family: var(--heading); letter-spacing: 0.05em; cursor: pointer; }
+.shop-tab:hover, .shop-tab:focus-visible { color: var(--gold); outline: none; }
+.shop-tab.active { border-color: rgba(212, 169, 74, 0.6); background: rgba(212, 169, 74, 0.15); color: var(--gold); }
+#shop-wares, #shop-sell, #shop-quests { display: flex; flex-direction: column; gap: 0.35rem; }
+#shop-wares[hidden], #shop-sell[hidden], #shop-quests[hidden] { display: none; }
+.shop-row, .quest-card { padding: 0.5rem 0.7rem; border: 1px solid rgba(212, 169, 74, 0.3); border-radius: 6px; background: rgba(40, 32, 52, 0.6); }
+.shop-row { display: flex; align-items: center; gap: 0.6rem; }
+.shop-row.out-of-stock { opacity: 0.6; }
+.shop-text { flex: 1; }
+.shop-item-name { font-size: 1.05rem; }
+.shop-line { font-size: 0.88rem; opacity: 0.85; }
+.shop-price { color: var(--gold); }
+.shop-price.cheaper { color: #7bd88f; }
+.shop-price.dearer { color: #ff8a80; }
+.quest-card.ready { border-color: var(--gold); }
+.quest-offer { font-style: italic; }
+.quest-bar { margin: 0.4rem 0; }
+.quest-buttons { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+#shop-haggle { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.5rem 0; padding: 0.45rem 0.8rem; border: 1px solid rgba(212, 169, 74, 0.4); border-radius: 6px; text-align: center; }
+#shop-haggle[hidden] { display: none; }
+#shop-haggle[data-outcome='success'] { border-color: rgba(218, 165, 32, 0.9); }
+#shop-haggle[data-outcome='failure'] { border-color: rgba(239, 83, 80, 0.8); }
+#shop-haggle .haggle-roll { font-size: 0.9rem; opacity: 0.9; }
+#shop-haggle .haggle-verdict { font-family: var(--heading); letter-spacing: 0.03em; }
+#shop-haggle.haggle-success { animation: haggle-gold 0.6s ease-out; }
+#shop-haggle.haggle-failure { animation: haggle-red 0.6s ease-out; }
+@keyframes haggle-gold {
+  0% { background: rgba(255, 215, 80, 0.75); box-shadow: 0 0 28px rgba(255, 215, 80, 0.9); }
+  100% { background: transparent; box-shadow: none; }
+}
+@keyframes haggle-red {
+  0% { background: rgba(239, 83, 80, 0.7); transform: translateX(0); }
+  15% { transform: translateX(-7px); }
+  30% { transform: translateX(7px); }
+  45% { transform: translateX(-5px); }
+  60% { transform: translateX(4px); }
+  75% { transform: translateX(-2px); }
+  100% { background: transparent; transform: translateX(0); }
+}

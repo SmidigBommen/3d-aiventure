@@ -2,6 +2,7 @@
 
 import type { WorldState } from './api';
 import { asiBadge } from './world/sheet';
+import { showQuests } from './world/shopPanel';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const show = (node: HTMLElement, visible: boolean): void => {
@@ -58,6 +59,7 @@ export function showHud(state: WorldState, entered: boolean): void {
   const badge = asiBadge(state.asi_points ?? 0);
   el('hud-asi').textContent = badge ?? '';
   show(el('hud-asi'), badge !== null);
+  showQuests(state.quests ?? []);
   if (entered) {
     const description = el('hud-description');
     description.textContent = area?.description ?? '';

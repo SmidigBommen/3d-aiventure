@@ -58,12 +58,13 @@ app.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
 app.include_router(saves.router, prefix="/saves", tags=["saves"])
 
 # JSON API for the 3D client
-from web.api import battle as battle_api, character as character_api, event as event_api, world as world_api
+from web.api import battle as battle_api, character as character_api, event as event_api, shop as shop_api, world as world_api
 
 app.include_router(world_api.router, prefix="/api", tags=["api"])
 app.include_router(battle_api.router, prefix="/api/battle", tags=["api"])
 app.include_router(event_api.router, prefix="/api/event", tags=["api"])
 app.include_router(character_api.router, prefix="/api", tags=["api"])
+app.include_router(shop_api.router, prefix="/api/shop", tags=["api"])
 
 
 # The 3D client (built by `pnpm build` into client/dist) is served at /. Each of its top-level

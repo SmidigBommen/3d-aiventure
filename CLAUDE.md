@@ -77,6 +77,7 @@ web/api/                         JSON API routers (added by work items)
 web/fight.py, web/world.py       the fight and the world as functions of a session, shared by both interfaces
 web/events.py                    exploration events as functions of a session, shared by both interfaces
 web/inventory.py, web/sheet.py   the backpack and the character sheet as functions of a session, shared by both interfaces
+web/shop.py                      Elara's shop and the quest board as functions of a session, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
@@ -134,8 +135,9 @@ tools/                           balance simulator, sprite drawing, classic scre
   result}` during a fight, when `screen` is `'battle'` and `player` is the battle stance), `event`
   (null, or `{view, result}` while the event panel is open and `screen` is `'event'`), `intro` (null,
   or the boss id while the boss introduction is open and `screen` is `'intro'`), `panel` (null,
-  `'inventory'` or `'sheet'` while that panel is on screen; `screen` stays `'world'`, `prompt` and
-  `interaction` are null), `inventory` and `sheet` (the views of the last answer), `resting`, and the
+  `'inventory'`, `'sheet'` or `'shop'` while that panel is on screen; `screen` stays `'world'`, `prompt` and
+  `interaction` are null), `inventory` and `sheet` (the views of the last answer), `shop` (null, or
+  `{view, tab, haggle}` while the shop panel is open), `resting`, and the
   actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
   boss introduction). A fight, an event and an introduction have no actions here: the smoke test
   presses the real keys.
@@ -148,16 +150,20 @@ tools/                           balance simulator, sprite drawing, classic scre
   both modes it walks up to the first boss and opens the inventory and the character sheet in the
   tavern (I, C, Esc, the menu entries). With `--serve` it then edits its session (wounded, level 4,
   a second weapon and armour) and drinks a potion, equips both, spends an ability point and rests at
-  the inn front, with the answer of `/api/rest` held back for the screenshot of the black view. `walkTo(slot, range)` finds a way around what stands on
+  the inn front, with the answer of `/api/rest` held back for the screenshot of the black view. In both
+  modes it then talks to Elara in the market and opens the three tabs of her shop; with `--serve` it
+  haggles (d20 19 and 2), buys two potions, sells a dagger, accepts Goblin Menace, wins two planted
+  goblin fights at the docks and turns the quest in. `walkTo(slot, range)` finds a way around what stands on
   the floor.
 - With `--serve` the smoke test starts the server through `execution/smoke_server.py`, which wraps
   `Dice.roll_d20`: while `$AIVENTURE_DATA/d20.txt` holds numbers, a d20 roll takes the first one and
   removes it. Nothing under `web/`, `engine/` or `client/` reads a test setting.
-- Shop, quests, travel, journal and saves still happen on the classic pages, reached from the menu
+- Travel, journal and saves still happen on the classic pages, reached from the menu
   (M or Esc); the classic navigation links back with "3D world". Battles, events and bosses are met
   and played in the world ("Fighting in the world" and "Events and bosses in the world" below);
   inventory, character sheet and rest are panels and a landmark in the world ("Inventory, character
-  sheet and rest" below).
+  sheet and rest" below); the shop and the quests are Elara in her stall ("Elara's shop and quests"
+  below). The classic `/shop` page keeps working.
 
 ### What an area holds
 
@@ -208,6 +214,45 @@ tools/                           balance simulator, sprite drawing, classic scre
   the player back in front of it; a fight drops it. When `/` loads with a matching entry and nothing
   pending it posts `/api/enter`, skips the title screen and puts the player there. Continue on the
   title screen posts `/api/enter` too. Nothing met in the world leaves `/`.
+
+### Elara's shop and quests
+
+- **Shared functions** in `web/shop.py`, in the pattern of `web/inventory.py`: `shop_view(session,
+  context=None)`, `buy`, `sell`, `haggle`, `accept_quest`, `turn_in_quest`, `abandon_quest`, each
+  action returning `{"message", "context", "haggle"}` or raising `fight.Rejected` before anything
+  changed; also `tracked_quests`, `dialog(context)`, `REFUSAL_CONTEXT` and the helpers the classic
+  page uses (`wares`, `sellable_items`, `active_quests`, `available_quests`, `restock_shop`, ...).
+  An action rolls its dice first; Elara's line (`random.choice` in `dialog`) is drawn after, when the
+  view is built. `web/routes/shop.py` is the page plus thin wrappers that turn the outcome into the
+  flash keys (`shop_message`, `shop_error`, `shop_dialog_context`) and `session.haggle_result`.
+  `web/shop.py` imports `Rejected` inside a function: `web.fight` imports `restock_shop` from it.
+- **Selling a quest item is refused** in both interfaces (`not_sellable`).
+- **API** (`web/api/shop.py`, under `/api/shop`): `GET` (writes nothing, pops no flash; a null
+  `shop_inventory` is shown as full stock), `POST buy`, `sell`, `haggle` (`{"item_index"}`),
+  `quest/accept`, `quest/turn-in`, `quest/abandon` (`{"quest_id"}`). Every answer is `{"shop",
+  "state", "message", "haggle"}`. Checks in this order: `no_character`, `bad_request`, `pending`
+  (POST only), `no_shop`, then the action's own refusal (`STATUS` in the router), which carries
+  `dialog` for `already_haggled` and `quest_slots_full`. The API sets no flash and leaves
+  `haggle_result` alone.
+- **State**: `world_state` has the top-level `quests`: the active quests in the order of
+  `active_quests` (`id`, `name`, `type`, `target_monster`, `target_count`, `progress`, `status`).
+- **Shop slot**: `slots.shop` is where Elara stands, non-null exactly when the dressing placed the
+  `shop` landmark: inside the stall's solid box, 0.85 m behind the middle of its table on the side
+  away from the default spawn (`keeperPoint`, `stallFront` in `dressing.ts`). She adds no obstacle.
+  `interactionAt` offers `{kind: 'shop', prompt: 'E: talk to Elara'}` within 3 m, last in a tie.
+  `ELARA` and `ELARA_IDLE` in `contents.ts` are her look and clip; measured in `shop.test.ts`.
+- **`client/src/world/shop.ts`** (pure): the types of the views and the lines (`tabForKey`,
+  `wareLine`, `wareActions`, `haggleFeedback`, `trackerLines`, `readyCount`, `questBadge`,
+  `killAnnouncement`). **`client/src/world/shopPanel.ts`** fills `#shop-panel`, `#shop-haggle`
+  (class `haggle-success` or `haggle-failure`, a 0.6 s animation in `style.css`), `#hud-quests` and
+  `#hud-quest-ready`; `showHud` in `ui.ts` calls `showQuests` with every state.
+- **`contentScene.ts`** draws Elara on `slots.shop` whatever the area holds, with her name plate and
+  a gold "!" (`setQuestReady`, set every frame from `readyCount(state.quests)`).
+- **`main.ts`**: E at Elara opens the panel from `GET /api/shop` (`openShop`); `panel` is `'shop'`
+  and `store` holds the view, the tab and the last haggle. Keys 1, 2, 3 switch tabs, Esc closes; E,
+  I, C and M do nothing. A button posts its action (`shopAction`) and the panel and the heads-up
+  display are drawn again from the answer. After a victory, Continue shows
+  `killAnnouncement(rewards.quest_updates)` in `#notice`.
 
 ### Inventory, character sheet and rest
 
