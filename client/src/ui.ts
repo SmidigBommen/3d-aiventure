@@ -52,7 +52,7 @@ export function showHud(state: WorldState, entered: boolean): void {
   danger.className = `danger danger-${area?.danger ?? 'safe'}`;
   if (character) {
     el('hud-character').textContent =
-      `${character.name} · Level ${character.level} · HP ${character.current_hit_points}/${character.max_hit_points} · PP ${character.power_points}/${character.max_power_points}`;
+      `${character.name} · Level ${character.level} · HP ${character.current_hit_points}/${character.max_hit_points} · PP ${character.power_points}/${character.max_power_points} · XP ${character.xp}/${character.xp_to_next_level} · Gold ${character.gold}`;
   }
   if (entered) {
     const description = el('hud-description');

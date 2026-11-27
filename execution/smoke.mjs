@@ -3,6 +3,8 @@
 //   node execution/smoke.mjs --url URL --out DIR     against a server that is already running
 //   node execution/smoke.mjs --serve --out DIR       builds nothing, but starts its own server on a
 //                                                    free port with an empty data folder (run `pnpm build` first)
+// With --serve it also fights in the 3D world: a win, an ability and an item, a flight, a defeat with
+// Rise Again, and a reload in the middle of a fight.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
 // failed request, HTTP status >= 400, a 3D view that renders nothing, a model that did not load,
@@ -238,9 +240,10 @@ function defeatEveryBoss() {
 }
 
 /** Puts a monster or an event (or neither) into the area the character stands in, as the next roll would. */
-function plant(monster, event) {
+function plant(monster, event, more = () => {}) {
   editSession((session) => {
     session.character.max_hit_points = session.character.current_hit_points = 9999;
+    more(session);
     session.area_contents = {
       location: session.location_name, area_id: session.area_id, seq: (session.area_contents?.seq ?? 0) + 1, monster, event,
     };
@@ -333,7 +336,59 @@ async function promptShot(text, name) {
   await worldShot(name);
 }
 
-/** Wins the battle that is under way with attacks through the classic route, then shows the victory page. */
+/**
+ * Presses E in front of the monster and waits for the fight: still on /, the battle screen, the panel
+ * shown, the mouse free, the player 1.5 to 2.5 m from the monster. Returns the battle stance.
+ */
+async function startFight(name) {
+  await page.keyboard.press('KeyE');
+  await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
+  const seen = await page.evaluate(() => ({
+    path: window.location.pathname, player: window.__aiv.player, slot: window.__aiv.layout.slots.monster, locked: document.pointerLockElement !== null,
+    interaction: window.__aiv.interaction, prompt: window.__aiv.prompt, menu: window.__aiv.menuOpen,
+  }));
+  const distance = Math.hypot(seen.player.x - seen.slot.x, seen.player.z - seen.slot.z);
+  if (seen.path !== '/') errors.push(`${name}: the fight left / for ${seen.path}`);
+  if (seen.locked) errors.push(`${name}: the pointer is still locked`);
+  if (!(distance >= 1.5 - 1e-6 && distance <= 2.5 + 1e-6)) errors.push(`${name}: the player stands ${distance.toFixed(2)} m from the monster`);
+  if (seen.interaction !== null || seen.prompt !== null) errors.push(`${name}: there is an interaction or a prompt during the fight`);
+  await page.keyboard.press('KeyM');
+  if (seen.menu || (await page.evaluate(() => window.__aiv.menuOpen))) errors.push(`${name}: the menu opens during a fight`);
+  // The view has arrived at the stance.
+  await page.waitForTimeout(500);
+  return seen.player;
+}
+
+/** Waits until the fight takes a key again, shows its result, or is over. */
+async function untilOpen() {
+  await page.waitForFunction(() => window.__aiv.screen !== 'battle' || (window.__aiv.battle !== null && (window.__aiv.battle.result !== null || !window.__aiv.battle.locked)), null, { timeout: 30000 });
+}
+
+/** Presses `key` each time the fight takes one, until the result panel shows `result`. */
+async function fightUntil(key, result, name) {
+  for (let turns = 0; turns < 200; turns++) {
+    await untilOpen();
+    const now = await page.evaluate(() => (window.__aiv.battle ? window.__aiv.battle.result ?? 'fight' : 'over'));
+    if (now === result) {
+      await page.waitForSelector('#battle-result', { state: 'visible', timeout: 5000 });
+      return;
+    }
+    if (now !== 'fight') throw new Error(`${name}: the fight ended in ${now}, expected ${result}`);
+    await page.keyboard.press(key);
+    await page.waitForFunction(() => window.__aiv.battle === null || window.__aiv.battle.locked || window.__aiv.battle.result !== null, null, { timeout: 30000 });
+  }
+  throw new Error(`${name}: the fight did not end`);
+}
+
+/** After a fight: walking again at the battle stance, the panel gone. */
+async function backToWalking(stance, name) {
+  await page.waitForFunction(inWorld, null, { timeout: 30000 });
+  const seen = await page.evaluate(() => ({ player: window.__aiv.player, battle: window.__aiv.battle, panel: !document.getElementById('battle-panel').hidden, path: window.location.pathname }));
+  if (Math.hypot(seen.player.x - stance.x, seen.player.z - stance.z) > 0.05) errors.push(`${name}: walking again at ${JSON.stringify(seen.player)}, the stance was ${JSON.stringify(stance)}`);
+  if (seen.battle !== null || seen.panel || seen.path !== '/') errors.push(`${name}: after the fight: battle ${JSON.stringify(seen.battle)}, panel shown ${seen.panel}, path ${seen.path}`);
+}
+
+/** Wins a battle that an event started on the classic pages, with attacks through the classic route, then shows the victory page. */
 async function winBattle() {
   for (let round = 0; round < 200; round++) {
     const at = await page.evaluate(async () => {
@@ -472,6 +527,7 @@ try {
 
   // 12. The Whispering Woods. With --serve a goblin is planted at the entrance before the world is entered.
   const GOBLIN = { id: 'smoke-goblin', race: 'Goblin', class_name: 'Rogue', level: 1, name: 'Grak', weapon: 'Club' };
+  const ORC = { id: 'smoke-orc', race: 'Orc', class_name: 'Fighter', level: 4, name: 'Thurg', weapon: 'Greatclub' };
   await post('/game/travel', [['location_name', 'Whispering Woods']]);
   if (serve) plant(GOBLIN, null);
   await openTitle();
@@ -480,24 +536,150 @@ try {
   await worldShot('loc-whispering-woods');
 
   // 13. What an area holds: a monster, an event object and the search spot, met and come back from.
-  const encounters = ['content-monster', 'prompt-monster', 'classic-battle', 'classic-victory', 'content-monster-gone',
-    'content-event', 'prompt-event', 'classic-event', 'content-event-gone', 'prompt-search', 'after-search'];
+  const encounters = ['content-monster', 'prompt-monster', 'battle-start', 'battle-turn', 'battle-victory', 'battle-after', 'content-monster-gone',
+    'battle-ability', 'battle-item', 'battle-flee', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'classic-event', 'content-event-gone', 'prompt-search', 'after-search'];
   if (serve) {
     await slotShot('monster', 'content-monster');
     const met = await page.evaluate(() => window.__aiv.contents?.monster ?? null);
     if (met?.id !== GOBLIN.id || met.name !== GOBLIN.name || met.race !== 'Goblin' || met.level !== 1) errors.push(`the planted goblin is shown as ${JSON.stringify(met)}`);
     await walkTo('monster', 2.6);
     await promptShot('E: fight Grak the Goblin', 'prompt-monster');
-    let stood = await page.evaluate(() => window.__aiv.player);
-    await Promise.all([page.waitForURL(onPath('/battle'), { timeout: 30000 }), page.keyboard.press('KeyE')]);
-    await page.waitForSelector('.battle-scene', { timeout: 10000 });
-    await shot('classic-battle');
-    await winBattle();
-    await shot('classic-victory');
-    await page.click('#back-link');
-    await backInWorld(stood, 'content-monster-gone');
-    if (await page.evaluate(() => window.__aiv.contents?.monster !== null)) errors.push('the monster is still in the area after the fight');
+
+    // 13a. The fight starts where the monster stands: no navigation, the panel over the view.
+    let stance = await startFight('battle-start');
+    await untilOpen();
+    await shot('battle-start');
+
+    // 13b. A turn is played; while it is, keys send nothing.
+    const sent = [];
+    const count = (request) => request.method() === 'POST' && request.url().includes('/api/battle/') && sent.push(request.url());
+    page.on('request', count);
+    await page.keyboard.press('KeyA');
+    await page.waitForFunction(() => window.__aiv.battle?.playing === true, null, { timeout: 30000 })
+      .catch(() => errors.push('battle-turn: no turn was played after A'));
+    for (const key of ['KeyA', 'KeyD', 'Digit1', 'KeyF']) await page.keyboard.press(key);
+    if (await page.evaluate(() => window.__aiv.battle?.locked !== true)) errors.push('battle-turn: the fight was not locked while the keys were pressed');
+    await shot('battle-turn');
+    await page.waitForTimeout(150);
+    if (sent.length !== 1) errors.push(`battle-turn: ${sent.length} requests were sent, expected the one attack: ${sent.join(', ')}`);
+    page.off('request', count);
+
+    // 13c. Attacks until the goblin falls: the result panel with the rewards.
+    await fightUntil('KeyA', 'victory', 'battle-victory');
+    const won = await page.textContent('#battle-result');
+    if (!/\+\d+ XP/.test(won) || !/\+\d+ gold/.test(won)) errors.push(`battle-victory: the result panel shows no XP and gold: "${won}"`);
+    await shot('battle-victory');
+
+    // 13d. Continue: walking again from the battle stance, the monster gone, the HUD with the new values.
+    await page.keyboard.press('Enter');
+    await backToWalking(stance, 'battle-after');
+    const after = await page.evaluate(() => ({ monster: window.__aiv.contents?.monster ?? null, character: window.__aiv.state.character }));
+    if (after.monster !== null) errors.push('battle-after: the monster is still in the area after the fight');
+    const hud = await page.textContent('#hud-character');
+    for (const part of [`XP ${after.character.xp}/${after.character.xp_to_next_level}`, `Gold ${after.character.gold}`]) {
+      if (!hud.includes(part)) errors.push(`battle-after: the HUD shows "${hud}", without "${part}"`);
+    }
+    if (!(after.character.xp > 0 && after.character.gold > 0)) errors.push(`battle-after: no XP or gold after the victory: ${JSON.stringify(after.character)}`);
+    await worldShot('battle-after');
     await worldShot('content-monster-gone');
+
+    // 13e. A second fight, against something that lasts, with a potion: an ability, then an item, then the win.
+    plant(ORC, null, (session) => {
+      session.character.inventory.push({ name: 'Healing Potion', description: '', type: 'potion', healing_amount: 10 });
+    });
+    await openTitle();
+    await enterWorld();
+    await walkTo('monster', 2.6);
+    stance = await startFight('battle-ability');
+    const potions = await page.evaluate(() => window.__aiv.battle.view.items.reduce((sum, stack) => sum + stack.count, 0));
+    for (const [key, name, kind] of [['Digit1', 'battle-ability', 'ability'], ['KeyQ', 'battle-item', 'item']]) {
+      await untilOpen();
+      const before = await page.evaluate(() => window.__aiv.battle?.view.turn.seq ?? null);
+      await page.keyboard.press(key);
+      await page.waitForFunction((n) => window.__aiv.battle?.playing === true && window.__aiv.battle.view.turn.seq !== n, before, { timeout: 30000 })
+        .catch(() => errors.push(`${name}: no turn was played after the key`));
+      const first = await page.evaluate(() => window.__aiv.battle?.view.turn.events[0] ?? null);
+      if (first?.actor !== 'player' || first.kind !== kind) errors.push(`${name}: the turn starts with ${JSON.stringify(first)}, expected the player's ${kind}`);
+      await page.waitForTimeout(450);
+      await shot(name);
+    }
+    const potionsLeft = await page.evaluate(() => (window.__aiv.battle?.view.items ?? []).reduce((sum, stack) => sum + stack.count, 0));
+    if (potionsLeft !== potions - 1) errors.push(`battle-item: ${potionsLeft} potions left of ${potions}`);
+    await fightUntil('KeyA', 'victory', 'battle-item');
+    await page.keyboard.press('Enter');
+    await backToWalking(stance, 'battle-item');
+
+    // 13f. A third fight, fled from: walking again, the monster back on its slot with its id.
+    plant({ ...GOBLIN, id: 'smoke-goblin-3' }, null);
+    await openTitle();
+    await enterWorld();
+    await walkTo('monster', 2.6);
+    stance = await startFight('battle-flee');
+    for (let tries = 0; tries < 60; tries++) {
+      await untilOpen();
+      if (await page.evaluate(() => window.__aiv.screen !== 'battle')) break;
+      await page.keyboard.press('KeyF');
+      await page.waitForFunction(() => window.__aiv.screen !== 'battle' || window.__aiv.battle?.locked === true, null, { timeout: 30000 });
+    }
+    await backToWalking(stance, 'battle-flee');
+    const fled = await page.evaluate(() => window.__aiv.contents?.monster?.id ?? null);
+    if (fled !== 'smoke-goblin-3') errors.push(`battle-flee: the monster in the area after the flight is ${JSON.stringify(fled)}`);
+    await worldShot('battle-flee');
+
+    // 13g. A fight that is lost: one hit point, defending until the end, then Rise Again.
+    editSession((session) => {
+      session.character.current_hit_points = 1;
+    });
+    await openTitle();
+    await enterWorld();
+    await walkTo('monster', 2.6);
+    await startFight('battle-defeat');
+    await fightUntil('KeyD', 'defeat', 'battle-defeat');
+    const lost = await page.textContent('#battle-result');
+    if (!lost.includes('You have been slain by Grak') || !lost.includes('Rise Again')) errors.push(`battle-defeat: the result panel says "${lost}"`);
+    await shot('battle-defeat');
+    await page.click('#battle-revive');
+    await page.waitForFunction(inWorld, null, { timeout: 60000 });
+    const risen = await page.evaluate(() => ({ area: window.__aiv.state.area.id, character: window.__aiv.state.character, battle: window.__aiv.battle }));
+    if (risen.area !== 'entrance' || risen.character.current_hit_points !== risen.character.max_hit_points || risen.battle !== null) {
+      errors.push(`battle-revived: ${JSON.stringify(risen).slice(0, 300)}`);
+    }
+    if (await page.isVisible('#battle-panel')) errors.push('battle-revived: the battle panel is still shown');
+    await worldShot('battle-revived');
+
+    // 13h. A reload in the middle of a fight: the panel is back without the title screen, and nothing is played again.
+    plant({ ...ORC, id: 'smoke-orc-2' }, null);
+    await openTitle();
+    await enterWorld();
+    await walkTo('monster', 2.6);
+    await startFight('battle-reload');
+    await untilOpen();
+    await page.keyboard.press('KeyD');
+    await page.waitForFunction(() => window.__aiv.battle?.playing === true, null, { timeout: 30000 }).catch(() => errors.push('battle-reload: no turn was played after D'));
+    await untilOpen();
+    await page.reload({ waitUntil: 'load', timeout: 30000 });
+    // In the page from its first script on: whether a turn was ever being played.
+    const played = page.evaluate(() => new Promise((done) => {
+      let seen = false;
+      const started = performance.now();
+      const look = () => {
+        seen = seen || window.__aiv?.battle?.playing === true;
+        if (performance.now() - started > 4000) done(seen);
+        else requestAnimationFrame(look);
+      };
+      look();
+    }));
+    await page.waitForFunction(() => window.__aiv?.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 60000 });
+    if (await page.isVisible('#title-screen')) errors.push('battle-reload: the title screen is shown');
+    if (await played) errors.push('battle-reload: the last turn was played again after the reload');
+    const reloaded = await page.evaluate(() => ({ phase: window.__aiv.battle.view.phase, locked: window.__aiv.battle.locked, monster: window.__aiv.battle.view.monster.name }));
+    if (reloaded.phase !== 'fight' || reloaded.locked || reloaded.monster !== ORC.name) errors.push(`battle-reload: ${JSON.stringify(reloaded)}`);
+    await shot('battle-reload');
+    stance = await page.evaluate(() => window.__aiv.player);
+    await fightUntil('KeyA', 'victory', 'battle-reload');
+    await page.keyboard.press('Enter');
+    await backToWalking(stance, 'battle-reload');
+    let stood;
 
     plant(null, { id: 'abandoned_chest' });
     await openTitle();

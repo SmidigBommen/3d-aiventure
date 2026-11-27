@@ -13,6 +13,9 @@
             </div>
             {% endif %}
             <div class="round-badge">Round {{ round }}</div>
+            {% if message %}
+            <div data-toast="{{ message.text }}" data-toast-type="{{ message.type }}" hidden></div>
+            {% endif %}
 
             {% include "battle/_stage.html" %}
 

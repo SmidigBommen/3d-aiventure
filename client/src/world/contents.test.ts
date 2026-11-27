@@ -4,13 +4,14 @@ import campaign from '../../../json/campaign.json';
 import eventObjects from '../../../json/event_objects.json';
 import events from '../../../json/events.json';
 import type { Vec2 } from '../input/movement';
+import { isFree } from './collision';
 import {
-  BOSS_SCALE, CONTACT_RANGE, CREATURES, EVENT_OBJECTS, PROMPT_RANGE, SEARCH_MARKERS, contentSolids, creatureLook, interactionAt, objectLook,
-  type AreaContents,
+  BATTLE_DISTANCE, BOSS_SCALE, CONTACT_RANGE, CREATURES, CREATURE_CLIPS, EVENT_OBJECTS, PROMPT_RANGE, SEARCH_MARKERS, battleStance, contentSolids,
+  creatureLook, creatureMotion, interactionAt, objectLook, type AreaContents,
 } from './contents';
 import { dressArea } from './dressing';
 import { MANIFEST, campaignDressSpecs, madeUpSpecs, triggerZone } from './dressingkit';
-import { buildLayout, type AreaLayout, type Box, type ContentSlots } from './layout';
+import { buildLayout, spawnPoint, type AreaLayout, type Box, type ContentSlots } from './layout';
 import { distanceToBox, gatePointOf } from './testkit';
 
 // --- measuring helpers, written from the specification ---------------------------------------------
@@ -257,5 +258,79 @@ describe('the tables', () => {
     const table = eventObjects as Record<string, { object: string; label: string }>;
     expect(Object.keys(table).sort()).toEqual(Object.keys(events).sort());
     for (const entry of Object.values(table)) expect(kinds).toContain(entry.object);
+  });
+});
+
+describe('creature clips', () => {
+  it('name the clips of every creature model', () => {
+    const models = [...new Set(Object.values(CREATURES).map((look) => look.model))];
+    expect(models).toHaveLength(19);
+    expect(Object.keys(CREATURE_CLIPS).sort()).toEqual([...models].sort());
+    expect(CREATURE_CLIPS['creatures/goblin']).toEqual({ idle: 'Idle', attack: 'SwordSlash', hurt: 'RecieveHit', death: 'Death' });
+    expect(CREATURE_CLIPS['creatures/giant'].death).toBe('EnemyArmature|EnemyArmature|EnemyArmature|Death');
+    expect(CREATURE_CLIPS['creatures/snake']).toEqual({ idle: 'SnakeArmature|Snake_Idle', attack: 'SnakeArmature|Snake_Attack', hurt: null, death: null });
+    expect(CREATURE_CLIPS['creatures/robot'].hurt).toBeNull();
+    expect(CREATURE_CLIPS['creatures/tree_spirit'].death).toBeNull();
+  });
+
+  it('fall back to moving the model when a clip is missing', () => {
+    expect(creatureMotion('creatures/goblin', 'attack')).toEqual({ clip: 'SwordSlash' });
+    expect(creatureMotion('creatures/snake', 'hurt')).toEqual({ motion: 'shake' });
+    expect(creatureMotion('creatures/snake', 'death')).toEqual({ motion: 'sink' });
+    expect(creatureMotion('creatures/tree_spirit', 'death')).toEqual({ motion: 'sink' });
+    expect(creatureMotion('creatures/robot', 'hurt')).toEqual({ motion: 'shake' });
+    expect(creatureMotion('creatures/nobody', 'attack')).toEqual({ motion: 'lunge' });
+    expect(creatureMotion('toString', 'idle')).toEqual({ motion: 'none' });
+    expect(creatureMotion('constructor', 'death')).toEqual({ motion: 'sink' });
+  });
+});
+
+describe('battle stance', () => {
+  const facesSlot = (stance: { x: number; z: number; yaw: number }, slot: Vec2): number => {
+    const d = between(stance, slot);
+    return Math.hypot(-Math.sin(stance.yaw) - (slot.x - stance.x) / d, -Math.cos(stance.yaw) - (slot.z - stance.z) / d);
+  };
+
+  it('is free, faces the slot and keeps its distance in every campaign area, from every spawn point', () => {
+    let cases = 0;
+    let moved = 0;
+    for (const { name, dressing } of CAMPAIGN) {
+      const layout = dressing.layout;
+      const slots = layout.slots as ContentSlots;
+      const spawns = [spawnPoint(layout, null), ...layout.gates.map((g) => spawnPoint(layout, g.exitId))];
+      for (const slot of slots.boss ? [slots.monster, slots.boss] : [slots.monster]) {
+        for (const from of [...spawns, slot, { x: slot.x + 0.3, z: slot.z }, slots.search, slots.event]) {
+          const stance = battleStance(from, slot, layout);
+          const d = between(stance, slot);
+          expect(isFree(stance, layout), name).toBe(true);
+          expect(d >= 1.5 - 1e-6 && d <= BATTLE_DISTANCE + 1e-6, `${name}: ${d} m`).toBe(true);
+          expect(facesSlot(stance, slot), name).toBeLessThan(1e-6);
+          const length = between(from, slot);
+          if (length > 1e-6) {
+            const straight = { x: slot.x + ((from.x - slot.x) / length) * BATTLE_DISTANCE, z: slot.z + ((from.z - slot.z) / length) * BATTLE_DISTANCE };
+            if (isFree(straight, layout)) expect(between(stance, straight), name).toBeLessThan(1e-9);
+            else moved += 1;
+          }
+          cases += 1;
+        }
+      }
+    }
+    expect(cases).toBeGreaterThan(300);
+    expect(moved).toBeGreaterThan(0);
+  });
+
+  it('stands on the side the player came from, or as near to it as is free', () => {
+    const layout = { ...buildLayout({ location: 'Nowhere', type: 'wilderness', id: 'field', exits: [] }), props: [] };
+    const slot = { x: 0, z: 0 };
+    const straight = battleStance({ x: 0, z: 6 }, slot, layout);
+    expect([straight.x, straight.z, Math.abs(straight.yaw)]).toEqual([0, BATTLE_DISTANCE, 0]);
+    const blocked = { ...layout, props: [{ x: 0, z: 2.5, halfX: 0.6, halfZ: 0.6, height: 1, kind: 'model' as const }] };
+    const stance = battleStance({ x: 0, z: 6 }, slot, blocked);
+    expect(isFree(stance, blocked)).toBe(true);
+    expect(stance.z).toBeGreaterThan(0);
+    expect(between(stance, slot)).toBeCloseTo(BATTLE_DISTANCE, 6);
+    // Nowhere to stand: the player stays where they are.
+    const walled = { ...layout, floor: { halfX: 0.5, halfZ: 0.5 } };
+    expect(battleStance({ x: 0.05, z: 0 }, slot, walled)).toMatchObject({ x: 0.05, z: 0 });
   });
 });

@@ -3,7 +3,8 @@
 // creature and event object (MODELS.md has the same tables). Pure: no rendering, no browser.
 
 import type { Vec2 } from '../input/movement';
-import type { AreaLayout, Box, ContentSlots } from './layout';
+import { isFree } from './collision';
+import { spawnPoint, type AreaLayout, type Box, type ContentSlots } from './layout';
 
 export const PROMPT_RANGE = 3; // m
 export const CONTACT_RANGE = 1.2; // m
@@ -112,6 +113,96 @@ const has = (table: object, key: string): boolean => Object.prototype.hasOwnProp
 
 export function creatureLook(key: string): CreatureLook {
   return has(CREATURES, key) ? CREATURES[key] : CREATURES.Goblin;
+}
+
+// --- clips ---------------------------------------------------------------------------------------
+
+export interface CreatureClips { idle: string | null; attack: string | null; hurt: string | null; death: string | null }
+
+const clips = (idle: string | null, attack: string | null, hurt: string | null, death: string | null): CreatureClips => ({ idle, attack, hurt, death });
+const QUATERNIUS = clips('Idle', 'Punch', 'HitReact', 'Death');
+const GIANT = 'EnemyArmature|EnemyArmature|EnemyArmature|';
+
+/** The clip names of each creature model, as in MODELS.md table 1. null: the file has no such clip. */
+export const CREATURE_CLIPS: Record<string, CreatureClips> = {
+  'creatures/goblin': clips('Idle', 'SwordSlash', 'RecieveHit', 'Death'),
+  'creatures/knight': clips('Idle', 'SwordSlash', 'RecieveHit', 'Death'),
+  'creatures/witch': clips('Idle', 'Punch', 'RecieveHit', 'Death'),
+  'creatures/orc': QUATERNIUS,
+  'creatures/yeti': QUATERNIUS,
+  'creatures/demon': QUATERNIUS,
+  'creatures/blue_demon': QUATERNIUS,
+  'creatures/dino': QUATERNIUS,
+  'creatures/dragon': clips('Flying_Idle', 'Punch', 'HitReact', 'Death'),
+  'creatures/ghost_skull': clips('Flying_Idle', 'Punch', 'HitReact', 'Death'),
+  'creatures/ghost': clips('Flying_Idle', 'Headbutt', 'HitReact', 'Death'),
+  'creatures/tree_spirit': clips('Idle', 'Bite_Front', 'HitRecieve', null),
+  'creatures/snake': clips('SnakeArmature|Snake_Idle', 'SnakeArmature|Snake_Attack', null, null),
+  'creatures/giant': clips(`${GIANT}Idle`, `${GIANT}Attack`, `${GIANT}HitRecieve`, `${GIANT}Death`),
+  'creatures/robot': clips('RobotArmature|Robot_Idle', 'RobotArmature|Robot_Punch', null, 'RobotArmature|Robot_Death'),
+  'creatures/skeleton_warrior': clips('Idle', '1H_Melee_Attack_Chop', 'Hit_A', 'Death_A'),
+  'creatures/cleric': clips('Idle', 'Staff_Attack', 'RecieveHit', 'Death'),
+  'creatures/king': clips('CharacterArmature|Idle', 'CharacterArmature|Sword_Slash', 'CharacterArmature|HitRecieve', 'CharacterArmature|Death'),
+  'creatures/wizard': clips('Idle', 'Spell1', 'RecieveHit', 'Death'),
+};
+
+export type ClipSlot = 'idle' | 'attack' | 'hurt' | 'death';
+export type Motion = 'none' | 'lunge' | 'shake' | 'sink';
+
+/** What a creature without a clip does instead: the model itself is moved. */
+const FALLBACK_MOTION: Record<ClipSlot, Motion> = { idle: 'none', attack: 'lunge', hurt: 'shake', death: 'sink' };
+
+/** How a model shows a slot: its clip, or the fallback motion when it has none (or is not in the table). */
+export function creatureMotion(model: string, slot: ClipSlot): { clip: string } | { motion: Motion } {
+  const clip = has(CREATURE_CLIPS, model) ? CREATURE_CLIPS[model][slot] : null;
+  return clip ? { clip } : { motion: FALLBACK_MOTION[slot] };
+}
+
+// --- battle stance -------------------------------------------------------------------------------
+
+export const BATTLE_DISTANCE = 2.5; // m between the player and what they fight
+const NEAREST_STANCE = 1.5; // m
+
+/**
+ * Where the player stands in a fight against what is on `slot`, coming from `from`: BATTLE_DISTANCE
+ * from the slot on the side they came from, facing it. When that point is taken, the nearest free
+ * one around the slot: first by side (within a quarter turn of where they came from), then by distance.
+ */
+export function battleStance(from: Vec2, slot: Vec2, layout: AreaLayout): { x: number; z: number; yaw: number } {
+  const facing = (p: Vec2): { x: number; z: number; yaw: number } => ({ x: p.x, z: p.z, yaw: Math.atan2(-(slot.x - p.x), -(slot.z - p.z)) });
+  let dx = from.x - slot.x;
+  let dz = from.z - slot.z;
+  if (Math.hypot(dx, dz) < 1e-6) {
+    const spawn = spawnPoint(layout, null);
+    dx = spawn.x - slot.x;
+    dz = spawn.z - slot.z;
+  }
+  let length = Math.hypot(dx, dz);
+  if (length < 1e-6) {
+    dx = 0;
+    dz = 1;
+    length = 1;
+  }
+  const at = (turn: number, distance: number): Vec2 => {
+    const cos = Math.cos(turn);
+    const sin = Math.sin(turn);
+    return { x: slot.x + ((dx * cos - dz * sin) / length) * distance, z: slot.z + ((dx * sin + dz * cos) / length) * distance };
+  };
+  const straight = { x: slot.x + (dx / length) * BATTLE_DISTANCE, z: slot.z + (dz / length) * BATTLE_DISTANCE };
+  if (isFree(straight, layout)) return facing(straight);
+  const STEP = Math.PI / 36;
+  for (const [first, last] of [[1, 18], [19, 36]]) {
+    for (let distance = BATTLE_DISTANCE; distance >= NEAREST_STANCE - 1e-9; distance -= 0.1) {
+      const d = Math.max(distance, NEAREST_STANCE);
+      for (let k = first; k <= last; k++) {
+        for (const turn of [k * STEP, -k * STEP]) {
+          const p = at(turn, d);
+          if (isFree(p, layout)) return facing(p);
+        }
+      }
+    }
+  }
+  return facing(from);
 }
 
 export interface ObjectLook { model: string; height: number; tint: string | null } // height in metres after scaling
