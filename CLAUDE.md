@@ -70,10 +70,11 @@ volume), otherwise under `web/sessions` and `web/saves`.
 ## Layout
 
 ```
-client/index.html, client/src/   the 3D client (TypeScript, Three.js, Vite)
+client/index.html, client/src/   the 3D client (TypeScript, Three.js, Vite); world/ the areas, battle/ the fight
 client/public/                   files served as they are (models, favicon)
 web/app.py                       FastAPI app: API, classic routes, and client/dist mounted at /
 web/api/                         JSON API routers (added by work items)
+web/fight.py, web/world.py       the fight and the world as functions of a session, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
@@ -126,33 +127,39 @@ tools/                           balance simulator, sprite drawing, classic scre
   and nobody walks until the models are in and the scene is built.
 - `window.__aiv`: `ready`, `frames`, `screen`, `state`, `player`, `layout` (the dressing's
   layout, with `slots`), `menuOpen`, `loading`, `modelErrors`, `dressing`, `triangles` (drawn in
-  the last frame), `contents`, `interaction`, `prompt`, and the actions `lookAt(x, z)` and
-  `interact()` (what the E key runs).
+  the last frame), `contents`, `interaction`, `prompt`, `battle` (null, or `{view, playing, locked,
+  result}` during a fight, when `screen` is `'battle'` and `player` is the battle stance), and the
+  actions `lookAt(x, z)` and `interact()` (what the E key runs). A fight has no actions here: the
+  smoke test presses the real keys.
 - The smoke test visits all eight locations with `--serve` (it marks every boss defeated in its
   own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1. With `--serve` it also
-  plants a monster and an event in its session file (`plant`), meets them, and searches; in both
-  modes it walks up to the first boss without starting the fight. `walkTo(slot, range)` finds a way
-  around what stands on the floor.
+  plants monsters and an event in its session file (`plant`), fights in the world (a win, an
+  ability and an item, a flight, a defeat with Rise Again, a reload in the middle of a fight), meets
+  the event, and searches; in both modes it walks up to the first boss without starting the fight.
+  `walkTo(slot, range)` finds a way around what stands on the floor.
 - Shop, inventory and travel still happen on the classic pages, reached from the menu (M or Esc);
-  the classic navigation links back with "3D world". Battles and events are met in the world and
-  played on the classic pages (below).
+  the classic navigation links back with "3D world". Battles are met and fought in the world
+  ("Fighting in the world" below); events are met in the world and played on the classic pages.
 
 ### What an area holds
 
 - **The roll** is `world.roll_explore(session)` in `web/world.py`: a monster (race, level, name,
-  class, weapon drawn by `pick_monster` in `web/routes/battle.py`, nothing built), an event id, or
+  class, weapon drawn by `pick_monster` in `web/fight.py`, nothing built), an event id, or
   nothing, with the odds of classic Explore. It is the first use of `random` in a request and the
   only place this roll exists. `world.roll_contents(session)` stores it.
 - **Session**: `area_contents` (`{"location", "area_id", "seq", "monster", "event"}`, at most one of
-  monster and event, `seq` up by one per roll) and `return_to_3d`. Contents that name another area
+  monster and event, `seq` up by one per roll), `return_to_3d` and `engaged_monster` (the contents
+  dict of the monster being fought when it was met through engage, else null; a successful flee puts
+  it back into the contents, the end of a fight clears it). Contents that name another area
   count as not rolled (`world.stored_contents`). They are rolled by `move_to_area`, classic travel,
   revive, `POST /api/enter` (only when not rolled) and `POST /api/search`. Meeting something takes
   it out (`take_monster`, `take_event`). The undefeated boss of the area is derived
   (`world.area_boss`), never stored.
 - **API** (`web/api/world.py`): `POST /api/enter`, `POST /api/search` (refused `occupied` while a
   monster or event is there, `nothing_to_find` without a search spot: `world.has_search_spot`) and
-  `POST /api/engage` with `{"id"}`, which answers `{"url", "state"}`: `/battle` for a monster
-  (`begin_monster_battle`) or boss, `/game/event` for an event. The world state carries `contents`
+  `POST /api/engage` with `{"id"}`, which answers `{"url", "state", "battle"}`: `/battle` and the
+  battle view for a monster (`begin_monster_battle`) or boss, `/game/event` and null for an event.
+  The world state carries `contents`
   (`seq`, `monster`, `event` with `object` and `label` from `json/event_objects.json`, `boss`,
   `search_spot`). `GET /api/state` never rolls.
 - **Classic Explore** makes the same roll, stores it and meets it at once. `return_to_3d` is set by
@@ -173,10 +180,61 @@ tools/                           balance simulator, sprite drawing, classic scre
   `loadFigures` (a copy of the file's scene, skinned, playing its idle clip), name plates as
   sprites, the glow of an event object. `main.ts` rebuilds it when the contents change, walks in the
   dressed layout plus `contentSolids`, shows `#prompt` and `#notice`, and runs E.
-- **Way back**: before `POST /api/engage` the client saves `{location, area, x, z, yaw}` under
-  `sessionStorage['aiv.return']` and goes to the answered `url`. When `/` loads with a matching
-  entry and nothing pending it posts `/api/enter`, skips the title screen and puts the player
-  there. Continue on the title screen posts `/api/enter` too.
+- **Way back** (events): before `POST /api/engage` the client saves `{location, area, x, z, yaw}`
+  under `sessionStorage['aiv.return']`; for an event it goes to the answered `url`. When `/` loads
+  with a matching entry and nothing pending it posts `/api/enter`, skips the title screen and puts
+  the player there. Continue on the title screen posts `/api/enter` too. A fight stays on `/`.
+
+### Fighting in the world
+
+- **`web/fight.py`** is the fight as functions of a `GameSession`: `attack`, `defend`,
+  `use_ability`, `use_item`, `flee`, `finish_player_turn` (the round loop, once), `end_battle`,
+  `revive`, and the helpers that start a fight (`begin_battle`, `begin_monster_battle`,
+  `begin_boss_battle`, `pick_monster`). No `Request`, no saving, no redirects. An action returns
+  the phase after it (`"fight"`, `"victory"`, `"defeat"`, `"fled"`) or raises `Rejected(code,
+  message)` before anything changed (`no_battle`, `not_your_turn`, `no_such_ability`,
+  `not_enough_pp`, `no_such_item`, `cannot_flee`, `not_defeated`): a rejected action starts no turn
+  and writes no log line. Both routers call them as `fight.attack(session)`, and the actions call
+  `finish_player_turn` by its module-level name.
+- **Classic routes** (`web/routes/battle.py`) are the pages plus thin wrappers: call the action,
+  save, redirect by phase; on `Rejected` back to `/battle` without saving. Fleeing from a boss
+  sets the flash `battle_message`, which `GET /battle` shows once as a toast. The names other code
+  imports from there (`begin_boss_battle`, `opened`, `end_battle`, `pick_monster`, ...) still exist.
+- **API** (`web/api/battle.py`, under `/api/battle`): `GET` (the view; writes and rolls nothing),
+  `POST attack`, `defend`, `ability` (`{"ability_id"}`), `item` (`{"item_index"}`), `flee`,
+  `continue` (after a victory: clears `battle_rewards`) and `revive`. Every answer is
+  `{"battle", "state"}`. A refusal leaves the session file untouched. Bodies are read as strict
+  JSON (no NaN, no repeated keys, UTF-8 only); a body that is not a JSON object is `bad_request` on
+  every POST, also on the ones that take nothing.
+- **Battle view** (`fight.battle_view(session, fled)`): `phase` (`fight`, `victory`, `defeat`,
+  `fled`, `none`), `round`, `player_turn`, `turn` (`seq`, `events`), `player`, `monster`,
+  `abilities` (with `summary`, `usable`, `hotkey`), `items` (stacks with `index`, `count`,
+  `hotkey`), `can_flee`, `flee`, `log`, `rewards`, `defeat`. It carries no taunt, so building it
+  uses no randomness. `client/src/battle/view.ts` (pure) has the same shape as `BattleView` and
+  `actionForKey(view, code)`, the classic hotkeys (A/D/F, 1-5, Q/W/E/R).
+- **`client/src/battle/timeline.ts`** (pure): `buildTimeline(events, after, finale)` turns a turn's
+  events into cues (`banner`, `anim`, `fx`, `float`, `hp`) on a clock: 0.25 s lead-in, a slot per
+  event, 0.9 s for the loser's fall, never more than 6 s (a longer turn is played faster).
+  `inputAt` is when input opens again. `client/src/battle/fx.ts` (pure) gives each of the 23
+  effect keys a colour and a particle pattern.
+- **`client/src/world/contents.ts`** also holds `CREATURE_CLIPS` (clip names per model, as in
+  `MODELS.md`), `creatureMotion(model, slot)` (the clip, or the fallback motion `lunge`, `shake`,
+  `sink`) and `battleStance(from, slot, layout)`: 2.5 m in front of the monster on the side the
+  player came from, or the nearest free point 1.5 to 2.5 m from it.
+- **`client/src/battle/battleScene.ts`** draws the fight: the monster on its slot (the boss slot
+  for the area's boss) with its clips, particles per effect key, what flies for a ranged hit, and
+  the offsets of the player's eye (lunge, rise, shake, sidestep, fall). `battle/panel.ts` fills
+  `#battle-panel` (`#battle-monster`, `#battle-player`, `#battle-actions`, `#battle-log`,
+  `#battle-banner`, `#battle-result`), the floating texts and the flash of an effect on the player.
+  Both run cues and show the view; neither decides anything.
+- **`main.ts`** holds the fight (`startBattle`, `present`, `act`, `proceed`, `riseAgain`): after
+  an engage answer with a battle the client stays on `/`, the view glides to the stance in 0.4 s,
+  and M, Esc, E and the movement keys do nothing. A turn whose `seq` differs from
+  `sessionStorage['aiv.turn']` and has events is played once; otherwise the result is shown at once.
+  Buttons and hotkeys are locked from sending an action until `inputAt`. Victory shows the rewards
+  and Continue (Enter or Space) posts `continue`; defeat shows Rise Again (`revive`) and Start
+  Over; a flight closes the panel. When `/` loads with a battle or defeat pending, the area is
+  entered and the panel opened from `GET /api/battle`, without the title screen.
 
 ## Classic application (the code this repository started from)
 
@@ -279,13 +337,13 @@ JSON-driven quest system with kill and gather quest types:
 
 ### Battle System
 
-Combat is handled via `web/routes/battle.py` with game logic in `engine/`:
+Combat is handled by `web/fight.py` (the actions and the round loop, called by the routes in `web/routes/battle.py` and by the JSON API) with game logic in `engine/`:
 
-- **Round loop**: every player action ends in `finish_player_turn()` — monster turn (skipped if stunned) → end-of-round conditions (DoT/regen) → tick effects and cooldowns → next round. A stunned player loops again and loses their turn. Add new player actions by mutating state and returning `await finish_player_turn(request, session)`
+- **Round loop**: every player action ends in `finish_player_turn()` — monster turn (skipped if stunned) → end-of-round conditions (DoT/regen) → tick effects and cooldowns → next round. A stunned player loops again and loses their turn. All of this is in `web/fight.py`, shared with the JSON API. Add a new player action there: check with `check_turn(session)`, raise `Rejected` before changing anything, then `begin_turn`, mutate, `record`, and `return finish_player_turn(session)`; give it a thin route in `web/routes/battle.py` and `web/api/battle.py`
 - **Critical hits**: natural 20 always hits and doubles damage dice; natural 1 always misses (weapon attacks and attack-roll abilities, both sides)
 - **Monster abilities**: `json/monster_abilities.json` (`races` → ability ids, `abilities` → definitions with `kind` attack/save/self, `cooldown`, `use_below_hp`, `lifesteal`, effects). Timed effects applied on the monster's turn get +1 duration because the monster acts last in the round
 - **Bosses**: `json/bosses.json`, keyed by the `boss` id on a `campaign.json` area. Built with `CombatantState.from_boss()` (authored HP/AC/scores, no factory). Enrage once at ≤50% HP, cannot be fled, fixed XP/gold rewards, guaranteed loot. Started via `POST /battle/boss` or `begin_boss_battle()` (travel ambush)
-- **Flee**: `POST /battle/flee` — d20 + DEX vs DC 10 + monster level // 2; failure costs the turn
+- **Flee**: `POST /battle/flee` — d20 + DEX vs DC 10 + monster level // 2; failure costs the turn. From a boss it is rejected with a toast and no log line
 - **Player defend** is a 1-round `ac` effect, not a mutation of `armor_class`
 - **Monster state**: `CombatantState` dataclass (in `engine/combatant.py`) with `to_dict()`/`from_dict()`/`from_monster()` for serialization
 - **Attack resolution**: `engine/combat.py` `resolve_weapon_attack()` — d20 + ability mod + proficiency + effect bonuses vs AC + effect bonuses. Returns `{hit, attack_roll, target_ac, damage}`

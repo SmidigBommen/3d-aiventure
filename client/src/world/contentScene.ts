@@ -66,12 +66,87 @@ function idleClip(clips: THREE.AnimationClip[]): THREE.AnimationClip | null {
   return named((n) => n === 'idle' || n.endsWith('|idle') || n.endsWith('_idle')) ?? named((n) => n.includes('idle')) ?? null;
 }
 
-interface Look {
+export interface Look {
   model: string;
   scale: number;
   tint: string | null;
   opacity: number;
   emissive: string | null;
+}
+
+/** A model made to stand somewhere: `root` is placed by the caller, `body` is the copy of the file's scene (null for a box). */
+export interface Standing {
+  root: THREE.Group;
+  body: THREE.Object3D | null;
+  top: number; // m above the floor
+  materials: THREE.MeshStandardMaterial[];
+  clips: THREE.AnimationClip[];
+  dispose: () => void;
+}
+
+/** The scale a boss is drawn at: its own times BOSS_SCALE, kept under a dungeon's ceiling. */
+export function bossScale(layout: AreaLayout, look: CreatureLook): number {
+  const height = modelSize(look.model)[1];
+  return layout.ceiling === null ? look.scale * BOSS_SCALE : Math.min(look.scale * BOSS_SCALE, (layout.ceiling - CEILING_ROOM) / height);
+}
+
+/**
+ * A model with its own copies of the materials, tinted. A figure with clips stands on its own origin;
+ * anything else is centred with its lowest point on the floor. A model that did not load is a box.
+ */
+export function standModel(look: Look, figure: Figure | null): Standing {
+  const root = new THREE.Group();
+  const owned: { dispose: () => void }[] = []; // made here; what belongs to the loader stays
+  const own = <T extends { dispose: () => void }>(thing: T): T => {
+    owned.push(thing);
+    return thing;
+  };
+  const dispose = (): void => {
+    for (const thing of owned) thing.dispose();
+  };
+  const [w, h, d] = modelSize(look.model);
+  const materials: THREE.MeshStandardMaterial[] = [];
+  if (!figure) {
+    const material = own(new THREE.MeshStandardMaterial({ color: look.tint ?? FALLBACK, roughness: 0.95, flatShading: true }));
+    const box = new THREE.Mesh(own(new THREE.BoxGeometry(w * look.scale, h * look.scale, d * look.scale)), material);
+    box.position.y = (h * look.scale) / 2;
+    root.add(box);
+    return { root, body: null, top: h * look.scale, materials: [material], clips: [], dispose };
+  }
+  const body = figure.instance();
+  body.scale.setScalar(look.scale);
+  const copies = new Map<THREE.Material, THREE.MeshStandardMaterial>();
+  const copy = (material: THREE.Material): THREE.Material => {
+    let mine = copies.get(material);
+    if (!mine) {
+      mine = own(material.clone()) as THREE.MeshStandardMaterial;
+      if (look.tint) mine.color?.multiply(new THREE.Color(look.tint));
+      if (look.emissive && mine.emissive) mine.emissive.set(look.emissive);
+      if (look.opacity < 1) {
+        mine.transparent = true;
+        mine.opacity = look.opacity;
+      }
+      copies.set(material, mine);
+      materials.push(mine);
+    }
+    return mine;
+  };
+  body.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.material = Array.isArray(mesh.material) ? mesh.material.map(copy) : copy(mesh.material);
+    // A skinned mesh is culled by where it stood when it was made; these few are always drawn.
+    mesh.frustumCulled = false;
+  });
+  root.add(body);
+  const box = new THREE.Box3().setFromObject(body);
+  if (figure.clips.length === 0 && Number.isFinite(box.min.y)) {
+    const centre = box.getCenter(new THREE.Vector3());
+    body.position.set(-centre.x, -box.min.y, -centre.z);
+    return { root, body, top: box.max.y - box.min.y, materials, clips: [], dispose };
+  }
+  const top = Number.isFinite(box.max.y) && box.max.y > 0.2 ? Math.min(box.max.y, h * look.scale * 2) : h * look.scale;
+  return { root, body, top, materials, clips: figure.clips, dispose };
 }
 
 export function buildContentScene(layout: AreaLayout, contents: AreaContents | null, figures: Map<string, Figure | null>): ContentScene {
@@ -87,65 +162,19 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
   let glow: THREE.PointLight | null = null;
   const slots = layout.slots;
 
-  /**
-   * A model standing at (x, z), with its own copies of the materials. A figure with clips stands on its
-   * own origin and plays its idle; anything else is centred on the spot with its lowest point on the floor.
-   */
+  /** A model standing at (x, z); a figure with clips plays its idle. */
   const stand = (look: Look, x: number, z: number): { root: THREE.Object3D; top: number; materials: THREE.MeshStandardMaterial[] } => {
-    const root = new THREE.Group();
-    root.position.set(x, 0, z);
-    group.add(root);
-    const [w, h, d] = modelSize(look.model);
-    const figure = figures.get(look.model) ?? null;
-    const materials: THREE.MeshStandardMaterial[] = [];
-    if (!figure) {
-      const material = own(new THREE.MeshStandardMaterial({ color: look.tint ?? FALLBACK, roughness: 0.95, flatShading: true }));
-      const box = new THREE.Mesh(own(new THREE.BoxGeometry(w * look.scale, h * look.scale, d * look.scale)), material);
-      box.position.y = (h * look.scale) / 2;
-      root.add(box);
-      return { root, top: h * look.scale, materials: [material] };
-    }
-    const body = figure.instance();
-    body.scale.setScalar(look.scale);
-    const copies = new Map<THREE.Material, THREE.MeshStandardMaterial>();
-    const copy = (material: THREE.Material): THREE.Material => {
-      let mine = copies.get(material);
-      if (!mine) {
-        mine = own(material.clone()) as THREE.MeshStandardMaterial;
-        if (look.tint) mine.color?.multiply(new THREE.Color(look.tint));
-        if (look.emissive && mine.emissive) mine.emissive.set(look.emissive);
-        if (look.opacity < 1) {
-          mine.transparent = true;
-          mine.opacity = look.opacity;
-        }
-        copies.set(material, mine);
-        materials.push(mine);
-      }
-      return mine;
-    };
-    body.traverse((object) => {
-      const mesh = object as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(copy) : copy(mesh.material);
-      // A skinned mesh is culled by where it stood when it was made; these few are always drawn.
-      mesh.frustumCulled = false;
-    });
-    root.add(body);
-    const idle = idleClip(figure.clips);
-    if (idle) {
-      const mixer = new THREE.AnimationMixer(body);
+    const standing = own(standModel(look, figures.get(look.model) ?? null));
+    standing.root.position.set(x, 0, z);
+    group.add(standing.root);
+    const idle = standing.body ? idleClip(standing.clips) : null;
+    if (idle && standing.body) {
+      const mixer = new THREE.AnimationMixer(standing.body);
       mixer.clipAction(idle).play();
       mixer.update(0);
       mixers.push(mixer);
     }
-    const box = new THREE.Box3().setFromObject(body);
-    if (figure.clips.length === 0 && Number.isFinite(box.min.y)) {
-      const centre = box.getCenter(new THREE.Vector3());
-      body.position.set(-centre.x, -box.min.y, -centre.z);
-      return { root, top: box.max.y - box.min.y, materials };
-    }
-    const top = Number.isFinite(box.max.y) && box.max.y > 0.2 ? Math.min(box.max.y, h * look.scale * 2) : h * look.scale;
-    return { root, top, materials };
+    return standing;
   };
 
   const name = (lines: string[], x: number, z: number, top: number): void => {
@@ -167,9 +196,7 @@ export function buildContentScene(layout: AreaLayout, contents: AreaContents | n
     }
     if (contents.boss && slots.boss) {
       const look = creatureLook(contents.boss.id);
-      const height = modelSize(look.model)[1];
-      const scale = layout.ceiling === null ? look.scale * BOSS_SCALE : Math.min(look.scale * BOSS_SCALE, (layout.ceiling - CEILING_ROOM) / height);
-      const { root, top } = stand(creature(look, scale), slots.boss.x, slots.boss.z);
+      const { root, top } = stand(creature(look, bossScale(layout, look)), slots.boss.x, slots.boss.z);
       facing.push(root);
       name([contents.boss.name], slots.boss.x, slots.boss.z, layout.ceiling === null ? top : Math.min(top, layout.ceiling - CEILING_ROOM));
     }

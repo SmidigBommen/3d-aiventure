@@ -372,6 +372,7 @@ class GameSession:
         # What waits in the area the character stands in (web/world.py): one monster or one event, not yet met
         self.area_contents = None     # {"location", "area_id", "seq", "monster", "event"}
         self.return_to_3d = False     # the last encounter was started from the 3D world
+        self.engaged_monster = None   # contents dict of the monster being fought when it was met in the 3D world
         # Flash messages (one-time display, cleared after read)
         self._flash = {}
 
@@ -430,6 +431,7 @@ class GameSession:
             "events_resolved": self.events_resolved,
             "area_contents": self.area_contents,
             "return_to_3d": self.return_to_3d,
+            "engaged_monster": self.engaged_monster,
             "_flash": self._flash,
         }
 
@@ -561,6 +563,7 @@ class GameSession:
         session.events_resolved = data.get("events_resolved", 0)
         session.area_contents = data.get("area_contents")
         session.return_to_3d = bool(data.get("return_to_3d", False))
+        session.engaged_monster = data.get("engaged_monster")
         session._flash = data.get("_flash", {})
 
         # Restore location from campaign data

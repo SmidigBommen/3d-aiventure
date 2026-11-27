@@ -53,6 +53,14 @@ A tint is a colour multiplied into every material (`material.color.multiply`). "
 
 Monsters and bosses: 10 exact, 11 stand-ins. Every character file has a skin and animation clips.
 
+In a fight the Idle, Attack, Hurt and Death columns are played by name (`CREATURE_CLIPS` in
+`client/src/world/contents.ts` holds the same names per model file). Where the column says "none",
+or the loaded file lacks the named clip, the model itself is moved instead (`creatureMotion`):
+attack is a lunge of 0.5 m towards the player and back, hurt a sideways shake for 0.3 s, death a
+sink of 1.5 m into the floor while fading; a missing idle stands still. A dodge is always a 0.3 m
+sidestep and back. This applies to the Blighted Dryad (death), the Sea Serpent (hurt, death) and
+the Shard Guardian (hurt).
+
 ## 2. Environment and props
 
 Native size is width x height x depth in file units. Scale is the factor that gives the stated real size.
