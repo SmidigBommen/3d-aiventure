@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   EYE_HEIGHT, GATE_DEPTH, GATE_SPAWN_DISTANCE, GATE_WIDTH, PLAYER_RADIUS, WALK_SPEED,
-  boundaryRuns, buildLayout, spawnPoint, type AreaLayout, type AreaSpec,
+  boundaryBlocks, boundaryRuns, buildLayout, spawnPoint, type AreaLayout, type AreaSpec,
 } from './layout';
 import { NORMALS, boxToZone, boxes, campaignAreas, distanceToBox, gatePointOf, inTriggerZone, mulberry32, walkable } from './testkit';
 
@@ -141,6 +141,52 @@ describe('boundaryRuns', () => {
             const c = side === 'north' || side === 'south' ? gate.x : gate.z;
             expect(run.to <= c - GATE_WIDTH / 2 || run.from >= c + GATE_WIDTH / 2).toBe(true);
           }
+        }
+      }
+    }
+  });
+});
+
+describe('boundaryBlocks', () => {
+  const THICKNESS = 0.6;
+
+  it('leaves every gate open over its full 3 m, on all four sides', () => {
+    const measured = { north: 0, south: 0, east: 0, west: 0 };
+    for (const spec of AREAS) {
+      const layout = buildLayout(spec);
+      const blocks = boundaryBlocks(layout, THICKNESS);
+      for (const gate of layout.gates) {
+        const alongX = gate.side === 'north' || gate.side === 'south';
+        const centre = alongX ? gate.x : gate.z;
+        // The extent of each block of this side along the edge.
+        const spans = blocks
+          .filter((b) => b.side === gate.side)
+          .map((b) => (alongX ? [b.x - b.halfX, b.x + b.halfX] : [b.z - b.halfZ, b.z + b.halfZ]));
+        const left = Math.max(...spans.filter(([, to]) => to <= centre).map(([, to]) => to));
+        const right = Math.min(...spans.filter(([from]) => from >= centre).map(([from]) => from));
+        expect(spans.some(([from, to]) => from < centre && to > centre), `${spec.id} ${gate.side}`).toBe(false);
+        expect(right - left, `${spec.location}/${spec.id} ${gate.side}`).toBeCloseTo(GATE_WIDTH, 9);
+        expect((left + right) / 2).toBeCloseTo(centre, 9);
+        measured[gate.side] += 1;
+      }
+    }
+    for (const side of ['north', 'south', 'east', 'west'] as const) expect(measured[side]).toBeGreaterThan(5);
+  });
+
+  it('stands outside the floor and closes the corners', () => {
+    for (const spec of AREAS) {
+      const layout = buildLayout(spec);
+      const { halfX, halfZ } = layout.floor;
+      const blocks = boundaryBlocks(layout, THICKNESS);
+      for (const b of blocks) {
+        const outside = Math.abs(b.x) - b.halfX >= halfX || Math.abs(b.z) - b.halfZ >= halfZ;
+        expect(outside, `${spec.id} ${b.side}`).toBe(true);
+      }
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          const corner = { x: sx * (halfX + THICKNESS / 2), z: sz * (halfZ + THICKNESS / 2) };
+          const covered = blocks.some((b) => Math.abs(corner.x - b.x) <= b.halfX && Math.abs(corner.z - b.z) <= b.halfZ);
+          expect(covered, `${spec.id} corner`).toBe(true);
         }
       }
     }

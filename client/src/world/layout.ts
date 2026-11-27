@@ -97,6 +97,34 @@ export function boundaryRuns(layout: AreaLayout): BoundaryRun[] {
   return runs;
 }
 
+/** A piece of the outer wall on the ground plane: centre and half extents, lying outside the floor. */
+export interface BoundaryBlock {
+  side: Side;
+  x: number;
+  z: number;
+  halfX: number;
+  halfZ: number;
+}
+
+/**
+ * The outer wall as blocks of the given thickness standing just outside the floor edge. Every gate
+ * keeps its full width open. The north and south blocks reach past the floor's corners to close
+ * them, and only there: an end next to a gate stops at the gate.
+ */
+export function boundaryBlocks(layout: AreaLayout, thickness: number): BoundaryBlock[] {
+  const { halfX, halfZ } = layout.floor;
+  return boundaryRuns(layout).map((run) => {
+    if (run.side === 'north' || run.side === 'south') {
+      const from = run.from <= -halfX ? run.from - thickness : run.from;
+      const to = run.to >= halfX ? run.to + thickness : run.to;
+      const z = run.side === 'north' ? -halfZ - thickness / 2 : halfZ + thickness / 2;
+      return { side: run.side, x: (from + to) / 2, z, halfX: (to - from) / 2, halfZ: thickness / 2 };
+    }
+    const x = run.side === 'west' ? -halfX - thickness / 2 : halfX + thickness / 2;
+    return { side: run.side, x, z: (run.from + run.to) / 2, halfX: thickness / 2, halfZ: (run.to - run.from) / 2 };
+  });
+}
+
 // ---------------------------------------------------------------------------------------------
 
 /** FNV-1a, so that every area gets its own seed. */

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { INWARD, boundaryRuns, type AreaLayout, type Box, type Gate, type Prop, type Side } from './layout';
+import { INWARD, boundaryBlocks, type AreaLayout, type Box, type Gate, type Prop, type Side } from './layout';
 
 // Draws an area from its layout. Everything solid comes from the layout; nothing here decides
 // where anything stands, and nothing is random.
@@ -112,8 +112,9 @@ function buildGate(gate: Gate, name: string, layout: AreaLayout, look: Look): TH
     passage.position.set(0, OPENING_HEIGHT / 2, -2.01);
     group.add(passage);
     const frame = material(look.post);
-    group.add(boxMesh(0.3, OPENING_HEIGHT, 0.3, frame, -half + 0.15, OPENING_HEIGHT / 2, 0.1));
-    group.add(boxMesh(0.3, OPENING_HEIGHT, 0.3, frame, half - 0.15, OPENING_HEIGHT / 2, 0.1));
+    // The door frame stands beside the opening, not in it: the doorway stays gate.width wide.
+    group.add(boxMesh(0.3, OPENING_HEIGHT, 0.3, frame, -half - 0.15, OPENING_HEIGHT / 2, 0.15));
+    group.add(boxMesh(0.3, OPENING_HEIGHT, 0.3, frame, half + 0.15, OPENING_HEIGHT / 2, 0.15));
   } else {
     // A free-standing arch in the wall or hedge: two posts and a beam.
     group.add(boxMesh(0.5, top, 0.7, post, -half - 0.25, top / 2, -WALL_THICKNESS / 2));
@@ -268,19 +269,10 @@ export function buildAreaScene(layout: AreaLayout, exits: { id: string; name: st
   // The boundary: a town wall, a hedge, or the walls of the room, open at the gates.
   const boundary = material(look.boundary);
   const height = layout.ceiling ?? look.boundaryHeight;
-  boundaryRuns(layout).forEach((run, i) => {
-    const length = run.to - run.from;
-    const middle = (run.from + run.to) / 2;
-    // A hedge is not level: its height steps with the run's index.
+  boundaryBlocks(layout, WALL_THICKNESS).forEach((block, i) => {
+    // A hedge is not level: its height steps with the block's index.
     const h = layout.type === 'wilderness' ? height + (i % 3) * 0.4 : height;
-    const alongX = run.side === 'north' || run.side === 'south';
-    const out = INWARD[run.side];
-    const offset = WALL_THICKNESS / 2;
-    scene.add(
-      alongX
-        ? boxMesh(length + WALL_THICKNESS * 2, h, WALL_THICKNESS, boundary, middle, h / 2, (run.side === 'north' ? -halfZ : halfZ) - out.z * offset)
-        : boxMesh(WALL_THICKNESS, h, length, boundary, (run.side === 'west' ? -halfX : halfX) - out.x * offset, h / 2, middle),
-    );
+    scene.add(boxMesh(block.halfX * 2, h, block.halfZ * 2, boundary, block.x, h / 2, block.z));
   });
 
   const names = new Map(exits.map((e) => [e.id, e.name]));
