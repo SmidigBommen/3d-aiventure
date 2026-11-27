@@ -14,7 +14,7 @@ export const GATE_SPAWN_DISTANCE = 2.5; // m from the gate's centre into the flo
 
 export type LocationType = 'town' | 'wilderness' | 'dungeon';
 export type Side = 'north' | 'south' | 'east' | 'west';
-export type PropKind = 'house' | 'crate' | 'tree' | 'rock' | 'pillar' | 'brazier';
+export type PropKind = 'house' | 'crate' | 'tree' | 'rock' | 'pillar' | 'brazier' | 'model'; // 'model': a solid of the dressing
 
 export interface AreaSpec {
   location: string; // location name, e.g. "Rivermeet Town"
@@ -128,7 +128,7 @@ export function boundaryBlocks(layout: AreaLayout, thickness: number): BoundaryB
 // ---------------------------------------------------------------------------------------------
 
 /** FNV-1a, so that every area gets its own seed. */
-function hash(text: string): number {
+export function hash(text: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);
@@ -138,7 +138,7 @@ function hash(text: string): number {
 }
 
 /** mulberry32: a small generator with values in [0, 1). */
-function generator(seed: number): () => number {
+export function generator(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;
@@ -157,19 +157,19 @@ const GATE_CORNER_MARGIN = 4; // m between a gate's centre and the corner of the
 const CLEARANCE = 1; // m kept free around spawn paths, trigger zones and between boxes
 const SPAWN_CLEARANCE = 1.5; // m kept free around every spawn point
 
-interface Rect {
+export interface Rect {
   x: number;
   z: number;
   halfX: number;
   halfZ: number;
 }
 
-function rectsOverlap(a: Rect, b: Rect, gap: number): boolean {
+export function rectsOverlap(a: Rect, b: Rect, gap: number): boolean {
   return Math.abs(a.x - b.x) < a.halfX + b.halfX + gap && Math.abs(a.z - b.z) < a.halfZ + b.halfZ + gap;
 }
 
 /** Whether the segment a-b touches the rectangle grown by `gap` on every side (slab test). */
-function segmentHitsRect(a: Vec2, b: Vec2, r: Rect, gap: number): boolean {
+export function segmentHitsRect(a: Vec2, b: Vec2, r: Rect, gap: number): boolean {
   let t0 = 0;
   let t1 = 1;
   const axes: [number, number, number, number][] = [
@@ -192,7 +192,7 @@ function segmentHitsRect(a: Vec2, b: Vec2, r: Rect, gap: number): boolean {
 }
 
 /** The rectangle of floor in which standing means walking through the gate. */
-function triggerRect(gate: Gate): Rect {
+export function triggerRect(gate: Gate): Rect {
   const n = INWARD[gate.side];
   const alongX = n.x === 0;
   return {

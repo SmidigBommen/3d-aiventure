@@ -20,6 +20,8 @@ h2 { font-size: 1.6rem; margin-bottom: 1rem; }
 .btn { display: inline-block; padding: 0.6rem 2.2rem; border: 1px solid var(--gold); border-radius: 6px; background: transparent; color: var(--ink); text-decoration: none; font: inherit; font-size: 1.2rem; cursor: pointer; }
 .btn:hover, .btn:focus-visible { background: rgba(212, 169, 74, 0.2); outline: none; }
 
+#loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 1.2rem 2.4rem; font-family: var(--heading); font-size: 1.3rem; letter-spacing: 0.06em; color: var(--gold); pointer-events: none; }
+
 /* Heads-up display */
 #hud { position: fixed; inset: 0; pointer-events: none; }
 .hud-box { position: absolute; background: rgba(11, 10, 16, 0.62); border: 1px solid rgba(212, 169, 74, 0.25); border-radius: 8px; padding: 0.6rem 0.9rem; }

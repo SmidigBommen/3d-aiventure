@@ -33,6 +33,11 @@ def has_shop(area) -> bool:
     return "shop" in str(area.get("special", "")).lower() if area else False
 
 
+def is_boss_area(area) -> bool:
+    """The campaign places a boss here, defeated or not."""
+    return bool(area) and area.get("boss") in get_bosses()
+
+
 def pending(session: GameSession):
     """What the player has to deal with before they can walk on: {"kind", "url"} or None."""
     if session.battle.is_active:
@@ -85,6 +90,8 @@ def world_state(session: GameSession) -> dict:
             "has_shop": has_shop(area),
             "can_rest": can_rest(area),
             "has_boss": campaign_rules.get_area_boss(area, get_bosses(), session.defeated_bosses) is not None,
+            "is_boss_area": is_boss_area(area),
+            "special": area.get("special"),
         } if area else None,
         "exits": [
             {"id": aid, "name": by_id[aid]["name"], "danger": danger_band(by_id[aid])}

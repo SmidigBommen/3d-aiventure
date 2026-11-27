@@ -63,6 +63,16 @@ export function showHud(state: WorldState, entered: boolean): void {
   }
 }
 
+/** The title panel away, while the first area loads. */
+export function hideTitle(): void {
+  show(el('title-screen'), false);
+}
+
+/** The loading indicator, shown while an area's models are on their way. */
+export function showLoading(on: boolean): void {
+  show(el('loading'), on);
+}
+
 export function showMenu(open: boolean): void {
   show(el('menu'), open);
 }

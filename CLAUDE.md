@@ -79,7 +79,7 @@ engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
 holdout/                         not in the repository; the factory puts hidden acceptance tests here when it runs them
 execution/smoke.mjs              browser smoke test
-tools/                           balance simulator, sprite drawing, classic screenshot tour
+tools/                           balance simulator, sprite drawing, classic screenshot tour, model manifest
 ```
 
 ## The 3D world so far
@@ -89,11 +89,45 @@ tools/                           balance simulator, sprite drawing, classic scre
   the classic routes in `web/routes/game.py` call the same functions.
 - `client/src/world/layout.ts` turns an area into a floor plan (`buildLayout`): floor size, one gate
   per exit, solid walls and props, spawn points. It keeps the straight line from the default spawn
-  to every gate clear. `collision.ts` holds `moveWithCollision` and `gateAt`; `walk.ts` holds one
+  to every gate clear. The client takes floor, gates and spawn from it; what stands on the floor
+  comes from the dressing (below). `collision.ts` holds `moveWithCollision` and `gateAt`; `walk.ts` holds one
   frame of walking and turning. All three are pure; `testkit.ts` holds the measuring helpers of
   their tests.
-- `client/src/world/areaScene.ts` draws a layout, `client/src/ui.ts` fills the HTML panels,
-  `client/src/main.ts` holds the screens (title, world, pending), the input and the frame loop.
+- `area` in both answers carries what the client dresses the area by: `has_shop`, `can_rest`,
+  `is_boss_area` (the campaign places a boss there, defeated or not; `world.is_boss_area`) and
+  `special` (the campaign's string, or null).
+- `client/src/world/models.json` is the model manifest: per `.glb` under `client/public/models/`
+  its bounding size and triangle count. `node tools/make_model_manifest.mjs` writes it (`--check`
+  compares); run it after adding or changing a model. Never edit it by hand.
+- `client/src/world/dressing.ts` (pure) decides what an area looks like. `dressArea(layout, spec)`
+  returns the placements (model, role, position, rotation, scale, tint, solid box), the mood and
+  the layout to walk in: the floor, gates and spawn of `buildLayout`, with the placements' solid
+  boxes as the only obstacles. The props `buildLayout` places are not used any more. A `Theme`
+  per location (default per type) lists the models: paving or scatter for the ground, the run
+  along the edge, the backdrop outside, the gateway, props, the boss arena. Landmarks: market
+  stall (shop), inn front or campfire (rest), arena (boss area), and `SPECIAL_LANDMARKS` by the
+  area's `special`. `moodFor(location, type)` gives sky, fog, main light and ground tint per
+  location. Rules it keeps, all measured in `dressing.test.ts` with the helpers of
+  `dressingkit.ts`: footprints of props and landmarks do not overlap each other, the trigger
+  zones or the spawn squares; solids stay 1 m off the straight lines from the spawns to the
+  gates; at most 150,000 triangles and 40 models per area.
+- The gateway is `env/dungeon/arch_stone`, scaled so that its legs stand `gate.width` apart
+  (3 file units between them), turned a quarter for east and west gates.
+- `client/src/world/modelLoader.ts` loads a model once per page load and keeps it; a model that
+  fails is recorded and drawn as a box. `client/src/world/areaScene.ts` draws a dressing: one
+  instanced mesh per model part and tint, light, fog and sky from the mood, the sign above each
+  gateway. It holds no table of which model goes where; what it knows about single models is
+  which ones burn (they get a light). Plain geometry is limited to the floor plane, the backing
+  behind dungeon walls, the passage behind a dungeon gate, the road out of an outdoor gate and
+  the signs.
+- `client/src/ui.ts` fills the HTML panels, `client/src/main.ts` holds the screens (title, world,
+  pending), the input and the frame loop. Entering an area is asynchronous: `#loading` is shown
+  and nobody walks until the models are in and the scene is built.
+- `window.__aiv`: `ready`, `frames`, `screen`, `state`, `player`, `layout` (the dressing's
+  layout), `menuOpen`, `loading`, `modelErrors`, `dressing`, `triangles` (drawn in the last
+  frame), and the action `lookAt(x, z)`.
+- The smoke test visits all eight locations with `--serve` (it marks every boss defeated in its
+  own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1.
 - Battles, events, shop, inventory and travel still happen on the classic pages, reached from the
   menu (M or Esc); the classic navigation links back with "3D world".
 
