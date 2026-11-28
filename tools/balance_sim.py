@@ -46,8 +46,8 @@ CLASSES = gs.get_classes()
 # Starting weapon / armor per class
 KIT = {
     "Fighter": ("Longsword", "Chain Mail"), "Wizard": ("Quarterstaff", ""),
-    "Rogue": ("Rapier", "Leather"), "Cleric": ("Mace", "Chain Mail"),
-    "Barbarian": ("Greataxe", "Hide"), "Ranger": ("Longbow", "Leather"),
+    "Rogue": ("Rapier", "Leather"), "Cleric": ("Mace", "Scale Mail"),
+    "Barbarian": ("Greatsword", "Hide"), "Ranger": ("Longbow", "Leather"),
     "Paladin": ("Longsword", "Chain Mail"), "Monk": ("Quarterstaff", ""),
     "Bard": ("Rapier", "Leather"), "Sorcerer": ("Dagger", ""),
     "Warlock": ("Dagger", "Leather"), "Druid": ("Quarterstaff", "Leather"),

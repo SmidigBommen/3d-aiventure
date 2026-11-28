@@ -70,7 +70,8 @@ volume), otherwise under `web/sessions` and `web/saves`.
 ## Layout
 
 ```
-client/index.html, client/src/   the 3D client (TypeScript, Three.js, Vite); world/ the areas, battle/ the fight
+client/index.html, client/src/   the 3D client (TypeScript, Three.js, Vite); world/ the areas, battle/ the fight;
+                                 creation.ts, saves.ts, settings.ts (pure) and startPanel.ts for what comes before the world
 client/public/                   files served as they are (models, favicon)
 web/app.py                       FastAPI app: API, classic routes, and client/dist mounted at /
 web/api/                         JSON API routers (added by work items)
@@ -79,6 +80,8 @@ web/events.py                    exploration events as functions of a session, s
 web/inventory.py, web/sheet.py   the backpack and the character sheet as functions of a session, shared by both interfaces
 web/shop.py                      Elara's shop and the quest board as functions of a session, shared by both interfaces
 web/travel.py                    travel, the journal and the ending as functions of a session, shared by both interfaces
+web/creation.py                  character creation (data, preview, validation, the new character), shared by both interfaces
+web/save_manager.py              the save files and their view, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
@@ -139,10 +142,17 @@ tools/                           balance simulator, sprite drawing, classic scre
   `'inventory'`, `'sheet'` or `'shop'` while that panel is on screen; `screen` stays `'world'`, `prompt` and
   `interaction` are null), `inventory` and `sheet` (the views of the last answer), `shop` (null, or
   `{view, tab, haggle}` while the shop panel is open), `resting`, what "Travel, journal, compass and
-  the ending" below adds (`travel`, `journal`, `arrival`, `compass`, `road`, `ending`, `travelling`), and the
+  the ending" below adds (`travel`, `journal`, `arrival`, `compass`, `road`, `ending`, `travelling`), what "Character creation,
+  title screen, saves and settings" below adds (`creation`, `opening`, `saves`, `settings`, `settingsOpen`), and the
   actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
   boss introduction). A fight, an event and an introduction have no actions here: the smoke test
   presses the real keys.
+- The smoke test makes its character in the creation panel (clicks and typed keys; no request goes to a
+  `/character/...` route, which it checks), reads the opening, changes the settings and reloads, saves into an
+  empty slot, walks through a gate (with `--serve` it also edits its gold), backs away from overwriting, loads
+  the save, deletes it and quits to the title screen; with `--url` and ten saves on the server the save steps
+  are skipped with a line in the output. A load gives the session a new file: with `--serve` the test keeps
+  only the one its cookie names (`keepCurrentSession`), so `editSession` still finds exactly one.
 - The smoke test visits all eight locations with `--serve` (it marks every boss defeated in its
   own session file to unlock Acts 2 and 3); with `--url` it stays in Act 1. With `--serve` it also
   plants monsters and events in its session file (`plant`), fights in the world (a win, an
@@ -160,13 +170,56 @@ tools/                           balance simulator, sprite drawing, classic scre
 - With `--serve` the smoke test starts the server through `execution/smoke_server.py`, which wraps
   `Dice.roll_d20`: while `$AIVENTURE_DATA/d20.txt` holds numbers, a d20 roll takes the first one and
   removes it. Nothing under `web/`, `engine/` or `client/` reads a test setting.
-- Saves still happen on the classic pages, reached from the menu (M or Esc); the classic navigation
-  links back with "3D world". Travel, the journal and the ending are in the world ("Travel, journal,
+- The menu (M or Esc) saves, loads, opens the settings and quits to the title screen ("Character creation,
+  title screen, saves and settings" below); its only link to a classic page is `#menu-location`, and the
+  classic navigation links back with "3D world". Travel, the journal and the ending are in the world ("Travel, journal,
   compass and the ending" below); their classic pages keep working. Battles, events and bosses are met
   and played in the world ("Fighting in the world" and "Events and bosses in the world" below);
   inventory, character sheet and rest are panels and a landmark in the world ("Inventory, character
   sheet and rest" below); the shop and the quests are Elara in her stall ("Elara's shop and quests"
   below). The classic `/shop` page keeps working.
+
+### Character creation, title screen, saves and settings
+
+- **`web/creation.py`** is creation as functions, in the pattern of `web/inventory.py`: `PORTRAITS`, `NAME_MAX`,
+  `allowed_weapons`, `allowed_armors`, `creation_view`, `preview(race, class_name)`, `opening()` and
+  `create(session, race, class_name, name, weapon, armor, portrait, skills)`, which raises `fight.Rejected`
+  before anything changed, in this order: `unknown_race`, `unknown_class`, `bad_name`, `bad_weapon`,
+  `bad_armor`, `bad_portrait`, `bad_skills`. Fewer skills than the class allows are fine. The classic routes
+  in `web/routes/character.py` take their lists, the preview and the creation from it; classic
+  `POST /character/create` answers a refusal with a redirect to `/character/details` and saves nothing.
+  `json/races.json` holds seven races; the view lists what the file holds.
+- **API** (`web/api/creation.py`, under `/api`): `GET creation`, `GET creation/preview?race=&class_name=`
+  (400 `unknown_race`, then `unknown_class`) and `POST new-game`. The client holds the choices until the last
+  step; there are no per-step requests. `new-game` checks `bad_request` (body, required strings, types), then
+  `create` on a fresh `GameSession` with the session id of the cookie, so nothing of an earlier game remains
+  and a refusal leaves the session file as it was. It answers `{"state", "opening"}`, rolls nothing and is
+  answered whatever is pending.
+- **Saves**: `save_manager.saves_view(session)` (`saves`, `max_saves`, `can_save`) and `web/api/saves.py`
+  under `/api/saves`: `GET`, `POST` (new slot; `slots_full` at `MAX_SAVES`), `POST {id}` (overwrite),
+  `POST {id}/load`, `POST {id}/delete`. Saving never writes the session file and is allowed during a fight
+  (the classic page keeps its refusal in its route). A load writes a new session file under a new id and
+  moves the cookie to it. The API sets no flash. The save files are the ones `/saves` uses.
+- **`client/src/creation.ts`** (pure): the view types, `CREATION_STEPS`, `Choices`, `chooseRace`,
+  `chooseClass` (keeps what the new class allows), `toggleSkill`, `stepComplete`, `nextStep`, `prevStep`,
+  `requestBody`, `acFor`, `openingLines`. **`client/src/saves.ts`** (pure): `slotRows`, `savedAtText`,
+  `slotLine`, `titleButtons`. **`client/src/settings.ts`** (pure): `Settings`, the ranges, `parseSettings`,
+  `serializeSettings`, `settingsTurn`, `KEY_LIST`. **`client/src/startPanel.ts`** fills `#creation-panel`,
+  `#opening-panel`, `#saves-panel` and `#settings-panel`.
+- **`main.ts`**: `showTitle(state, saveCount)` offers New game, Continue and Load game by `titleButtons`;
+  `saveCount` is refreshed with every `refresh` and every answer about saves. New game opens creation over the
+  title scene (`openCreation`, `screen` `'creation'`): Enter or `#creation-next` goes on from a complete step
+  (`creationNext`), Esc or `#creation-back` goes back and from the first step to the title (`creationBack`);
+  the preview is asked from the server whenever race or class changes (`askPreview`). On the summary Next posts
+  the new game and shows the opening (`screen` `'opening'`); Enter, Space or the button run `enterGame`, which
+  is also what Continue runs. The save slots (`openSaves`, `slotPressed`, `slotSend`) and the settings
+  (`openSettings`, `useSettings`) open from the menu, which stays open underneath (`menuOpen` true, `#menu`
+  hidden) and comes back on Esc; from the title screen the slots open in load mode. "Overwrite" and "Delete"
+  set `saves.confirm` and send nothing until Yes. After a load `resumeLoaded` forgets `aiv.return`, leaves the
+  world and goes on as a page load does: `/api/enter` and the area, or `refresh` for what is pending.
+  `quitToTitle` sends nothing.
+- **Settings** are read once with `parseSettings(localStorage.getItem(SETTINGS_KEY))`; a change sets `eye.fov`
+  and is written at once. Mouse look goes through `settingsTurn`. The server stores none of it.
 
 ### Travel, journal, compass and the ending
 

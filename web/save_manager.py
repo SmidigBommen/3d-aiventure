@@ -146,6 +146,25 @@ def delete_save(save_id: str) -> bool:
     return False
 
 
+def saves_view(session: GameSession) -> dict:
+    """The save slots as the 3D client shows them, newest first."""
+    saves = []
+    for save in list_saves():
+        metadata = save["metadata"]
+        saves.append({
+            "id": save["save_id"],
+            "name": metadata.get("character_name", "Unknown"),
+            "level": metadata.get("character_level", 0),
+            "race": metadata.get("character_race", ""),
+            "class_name": metadata.get("character_class", ""),
+            "location": metadata.get("location_name") or "Unknown",
+            "portrait": metadata.get("portrait") or "",
+            "saved_at": save["updated_at"],
+            "created_at": save["created_at"],
+        })
+    return {"saves": saves, "max_saves": MAX_SAVES, "can_save": session.character is not None}
+
+
 def get_save_metadata(save_id: str) -> Optional[dict]:
     """Read a single save and return only the metadata envelope."""
     path = _save_file(save_id)

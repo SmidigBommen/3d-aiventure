@@ -7,17 +7,8 @@ from fastapi.templating import Jinja2Templates
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from web.game_session import (
-    get_session, save_session, get_races, get_classes,
-    get_all_weapons_flat, get_all_armors_flat, get_campaign, get_class_abilities,
-    get_primary_modifier, calculate_max_pp,
-)
-from characterFactory import CharacterFactory
-from weaponFactory import WeaponFactory
-from armorFactory import ArmorFactory
-from items import HealingPotion
-from character import WeaponSlot
-from web import sheet
+from web.game_session import get_session, save_session, get_races, get_classes
+from web import creation, sheet
 from web.fight import Rejected
 from web.dependencies import require_character
 
@@ -41,19 +32,10 @@ async def new_character(request: Request):
 
     races = get_races()
 
-    # Format race data for display
-    race_list = []
-    for race_name, bonuses in races.items():
-        bonus_str = []
-        for stat, value in bonuses.items():
-            if value > 0:
-                stat_name = stat.replace("_bonus", "").upper()[:3]
-                bonus_str.append(f"+{value} {stat_name}")
-        race_list.append({
-            "name": race_name,
-            "bonuses": bonuses,
-            "bonus_display": ", ".join(bonus_str) if bonus_str else "No bonuses"
-        })
+    race_list = [
+        {"name": race_name, "bonuses": bonuses, "bonus_display": creation.bonus_display(bonuses)}
+        for race_name, bonuses in races.items()
+    ]
 
     return templates.TemplateResponse(request, "character/select_race.html", {
         "request": request,
@@ -93,11 +75,7 @@ async def select_class_page(request: Request):
         class_list.append({
             "name": class_name,
             "playstyle": props.get("playstyle", ""),
-            "abilities": [
-                {"name": a["name"], "unlock_level": a["unlock_level"], "cost": a["cost"],
-                 "description": a["description"]}
-                for a in sorted(get_class_abilities(class_name, 99), key=lambda a: (a["unlock_level"], a["cost"]))
-            ],
+            "abilities": creation.class_abilities(class_name),
             "hit_die": props["hit_die"],
             "primary_ability": props["primary_ability"],
             "ability_bonuses": ", ".join(
@@ -140,81 +118,30 @@ async def details_page(request: Request):
     if not session.character_creation.race or not session.character_creation.class_name:
         return RedirectResponse("/character/new", status_code=303)
 
-    classes = get_classes()
-    class_props = classes[session.character_creation.class_name]
-
-    # Get available weapons based on class proficiencies
-    all_weapons = get_all_weapons_flat()
-    available_weapons = []
-
-    weapon_proficiencies = class_props["weapon_proficiencies"]
-
-    for weapon_name, weapon_data in all_weapons.items():
-        # Check if class can use this weapon
-        can_use = False
-        if "Simple" in weapon_proficiencies and weapon_data["category"] == "Simple":
-            can_use = True
-        elif "Martial" in weapon_proficiencies and weapon_data["category"] == "Martial":
-            can_use = True
-        elif weapon_name in weapon_proficiencies:
-            can_use = True
-
-        if can_use:
-            available_weapons.append({
-                "name": weapon_name,
-                "damage_die": weapon_data["damage_die"],
-                "damage_type": weapon_data["damage_type"],
-                "category": weapon_data["category"],
-                "properties": ", ".join(weapon_data.get("properties", [])) or "None",
-                "description": weapon_data.get("description", "")
-            })
-
-    # Get available armors based on class armor training
-    all_armors = get_all_armors_flat()
-    armor_training = class_props["armor_training"]
-    available_armors = []
+    race = session.character_creation.race
+    class_name = session.character_creation.class_name
+    class_props = get_classes()[class_name]
 
     # What the finished character will look like (scores do not depend on the choices below)
-    preview = CharacterFactory().create_character(
-        name="", race=session.character_creation.race, class_name=session.character_creation.class_name)
-    armor_factory = ArmorFactory()
-
-    for armor_name, armor_data in all_armors.items():
-        if armor_data["category"] in armor_training:
-            available_armors.append({
-                "name": armor_name,
-                "total_ac": preview.ac_if_wearing(armor_factory.get_armor_by_name(armor_name)),
-                "base_ac": armor_data["base_ac"],
-                "category": armor_data["category"],
-                "weight": armor_data["weight"],
-                "stealth_disadvantage": armor_data["stealth_disadvantage"],
-            })
-
-    # Get skill choices for this class
-    skill_choices = class_props["skill_proficiency_choices"]
-    num_skills = class_props["num_skill_choices"]
+    preview = creation.preview(race, class_name)
+    total_ac = {armor["name"]: armor["total_ac"] for armor in preview["armors"]}
 
     return templates.TemplateResponse(request, "character/details.html", {
         "request": request,
         "title": "Character Details",
-        "race": session.character_creation.race,
-        "class_name": session.character_creation.class_name,
-        "weapons": available_weapons,
-        "armors": available_armors,
-        "preview": {
-            "scores": [
-                {"name": ability, "score": getattr(preview, f"{ability}_score"),
-                 "modifier": getattr(preview, f"{ability}_modifier"),
-                 "primary": ability == class_props["primary_ability"].lower()}
-                for ability in ("strength", "dexterity", "constitution", "intelligence", "wisdom", "charisma")
-            ],
-            "hit_points": preview.max_hit_points,
-            "power_points": calculate_max_pp(preview.class_name, 1, get_primary_modifier(preview)),
-            "unarmored_ac": preview.ac_if_wearing(None),
-            "starting_abilities": [a["name"] for a in get_class_abilities(preview.class_name, 1)],
-        },
-        "skill_choices": skill_choices,
-        "num_skills": num_skills
+        "race": race,
+        "class_name": class_name,
+        "weapons": [
+            {**weapon, "properties": ", ".join(weapon["properties"]) or "None"}
+            for weapon in creation.weapon_entries(class_name)
+        ],
+        "armors": [
+            {**armor, "total_ac": total_ac[armor["name"]]}
+            for armor in creation.armor_entries(class_name)
+        ],
+        "preview": preview,
+        "skill_choices": class_props["skill_proficiency_choices"],
+        "num_skills": class_props["num_skill_choices"],
     })
 
 
@@ -233,62 +160,13 @@ async def create_character(
     if not session.character_creation.race or not session.character_creation.class_name:
         return RedirectResponse("/character/new", status_code=303)
 
-    # Create character using factory
-    factory = CharacterFactory()
-    character = factory.create_character(
-        name=name,
-        race=session.character_creation.race,
-        class_name=session.character_creation.class_name
-    )
-
-    # Equip weapon
-    weapon_factory = WeaponFactory()
-    try:
-        weapon_obj = weapon_factory.get_weapon_by_name(weapon)
-        character.equip_weapon(weapon_obj, WeaponSlot.MAIN_HAND)
-    except ValueError:
-        pass  # Invalid weapon, skip
-
-    # Equip armor
-    if armor:
-        armor_factory = ArmorFactory()
-        try:
-            armor_obj = armor_factory.get_armor_by_name(armor)
-            character.equip(armor_obj)
-        except ValueError:
-            pass  # Invalid armor, skip
-
-    # Add skill proficiencies
     if isinstance(skills, str):
         skills = [skills]
-    for skill in skills:
-        character.add_skill_proficiency(skill)
-
-    # Add starting gold and items
-    character.gold = 25
-    character.add_item(HealingPotion("Small Healing Potion", 10))
-    character.add_item(HealingPotion("Medium Healing Potion", 25))
-
-    # Initialize power points
-    from web.game_session import calculate_max_pp, get_primary_modifier
-    primary_mod = get_primary_modifier(character)
-    character.max_power_points = calculate_max_pp(character.class_name, character.level, primary_mod)
-    character.power_points = character.max_power_points
-
-    # Save character to session
-    session.character = character
-    session.character_creation.name = name
-    session.character_creation.weapon = weapon
-    session.character_creation.armor = armor if armor else None
-    session.character_creation.portrait = portrait
-    session.character_creation.skills = skills
-
-    # Initialize campaign
-    campaign = get_campaign()
-    session.act = campaign["acts"][0]
-    session.current_location = session.act["locations"][0]
-    if session.current_location.get("areas"):
-        session.current_area = session.current_location["areas"][0]
+    try:
+        creation.create(session, session.character_creation.race, session.character_creation.class_name,
+                        name, weapon, armor, portrait, skills)
+    except Rejected:
+        return RedirectResponse("/character/details", status_code=303)
 
     save_session(request, session)
 

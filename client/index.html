@@ -56,10 +56,54 @@
       <h1>AIVentures</h1>
       <p class="tagline">The Shattered Crown</p>
       <p id="title-message" hidden></p>
-      <a class="btn" id="btn-new-game" href="/character/new" hidden>New game</a>
+      <button class="btn" id="btn-new-game" type="button" hidden>New game</button>
       <button class="btn" id="btn-continue" type="button" hidden>Continue</button>
+      <button class="btn" id="btn-load-game" type="button" hidden>Load game</button>
       <a class="btn" id="pending-link" href="/classic" hidden></a>
       <a class="btn" id="classic-link" href="/classic" hidden>Classic interface</a>
+    </div>
+
+    <div id="creation-panel" class="panel sheet-like" hidden>
+      <h2 id="creation-heading"></h2>
+      <div id="creation-steps"></div>
+      <p class="panel-message" hidden></p>
+      <div id="creation-body"></div>
+      <div id="creation-preview" hidden></div>
+      <div class="panel-foot">
+        <button class="btn btn-small btn-quiet" id="creation-back" type="button">Back</button>
+        <span>Enter: next · Esc: back</span>
+        <button class="btn btn-small" id="creation-next" type="button">Next</button>
+      </div>
+    </div>
+
+    <div id="opening-panel" class="panel" hidden>
+      <h2 id="opening-heading"></h2>
+      <p id="opening-act"></p>
+      <div id="opening-text"></div>
+      <p id="opening-quest"></p>
+      <button class="btn" id="opening-continue" type="button">Continue</button>
+    </div>
+
+    <div id="saves-panel" class="panel sheet-like" hidden>
+      <h2 id="saves-heading"></h2>
+      <p class="panel-message" hidden></p>
+      <div id="saves-slots"></div>
+      <div id="saves-confirm" hidden>
+        <span id="saves-question"></span>
+        <button class="btn btn-small" id="saves-yes" type="button">Yes</button>
+        <button class="btn btn-small btn-quiet" id="saves-no" type="button">No</button>
+      </div>
+      <div class="panel-foot"><span>Esc: close</span><button class="btn btn-small btn-quiet" id="saves-close" type="button">Close</button></div>
+    </div>
+
+    <div id="settings-panel" class="panel sheet-like" hidden>
+      <h2>Settings</h2>
+      <label class="setting"><span>Mouse sensitivity</span><input id="set-sensitivity" type="range"><output id="set-sensitivity-value"></output></label>
+      <label class="setting"><span>Invert Y</span><input id="set-invert-y" type="checkbox"><output></output></label>
+      <label class="setting"><span>Field of view</span><input id="set-fov" type="range"><output id="set-fov-value"></output></label>
+      <h3>Keys</h3>
+      <div id="settings-keys"></div>
+      <div class="panel-foot"><span>Esc: close</span><button class="btn btn-small btn-quiet" id="settings-close" type="button">Close</button></div>
     </div>
 
     <div id="event-panel" class="panel" hidden>
@@ -178,7 +222,10 @@
         <button id="menu-inventory" type="button">Inventory</button>
         <button id="menu-character" type="button">Character</button>
         <button id="menu-journal" type="button">Journal</button>
-        <a id="menu-saves" href="/saves">Saves</a>
+        <button id="menu-save" type="button">Save game</button>
+        <button id="menu-load" type="button">Load game</button>
+        <button id="menu-settings" type="button">Settings</button>
+        <button id="menu-quit" type="button">Quit to title</button>
       </nav>
       <button class="btn" id="menu-back" type="button">Back to the world</button>
     </div>
