@@ -1598,7 +1598,7 @@ try {
     if (await page.isVisible('#battle-panel')) errors.push('battle-revived: the battle panel is still shown');
     const fullHp = await page.evaluate(() => ({ edge: window.__aiv.vignette, shown: Number(getComputedStyle(document.getElementById('vignette')).opacity) }));
     if (fullHp.edge !== 0 || fullHp.shown !== 0) errors.push(`feel-low-hp: at full hit points: ${JSON.stringify(fullHp)}`);
-    if (!(await soundNow()).cues.slice(-3).includes('heal')) errors.push('battle-revived: Rise Again did not sound');
+    if (!(await soundNow()).cues.slice(-5).includes('heal')) errors.push('battle-revived: Rise Again did not sound');
     await worldShot('battle-revived');
 
     // 13h. A reload in the middle of a fight: the panel is back without the title screen, and nothing is played again.

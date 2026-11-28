@@ -534,12 +534,18 @@ async function showContents(next: WorldState): Promise<void> {
 async function enterArea(next: WorldState, cameFrom: string | null, at: { x: number; z: number; yaw: number } | null = null): Promise<void> {
   if (!next.location || !next.area) return;
   const mine = ++entry;
-  setLoading(true);
+  // Into another location: its card, for LOADING_CARD_SECONDS at least and until the models are in. The
+  // indicator waits for the card (the travel view may have to be asked for), so that it never shows the plain
+  // text first and the card a moment later; nobody walks meanwhile.
+  if (next.location.name === lastLocation) setLoading(true);
+  else {
+    loading = true;
+    card = null;
+  }
   if (screen === 'title') hideTitle();
-  // Into another location: its card, for LOADING_CARD_SECONDS at least and until the models are in.
   const shownCard = await cardFor(next.location.name);
   if (mine !== entry) return;
-  if (shownCard) setLoading(true, shownCard);
+  setLoading(true, shownCard);
   const spec = dressSpecOf({ location: next.location, area: next.area, exits: next.exits });
   const dressed = dressArea(buildLayout(spec), spec);
   // A model that fails to load comes back as null and is drawn as a box.
