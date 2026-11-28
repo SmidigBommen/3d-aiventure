@@ -71,8 +71,11 @@ export function bindEventPanel(handlers: { choose: (index: number) => void; proc
   el('event-continue').addEventListener('click', () => handlers.proceed());
 }
 
-/** The boss before the fight: its name, title and the authored introduction. `null` closes the panel. */
-export function showBossIntro(boss: BossContent | null): void {
+/**
+ * The boss before the fight: its name, title and the authored introduction. `null` closes the panel.
+ * `canStepBack` false: an ambush, with the Fight button only.
+ */
+export function showBossIntro(boss: Pick<BossContent, 'name' | 'title' | 'intro'> | null, canStepBack = true): void {
   el('boss-intro').hidden = boss === null;
   if (!boss) return;
   el('boss-intro-name').textContent = boss.name;
@@ -80,6 +83,7 @@ export function showBossIntro(boss: BossContent | null): void {
   el('boss-intro-title').hidden = !boss.title;
   el('boss-intro-text').textContent = boss.intro ?? '';
   el('boss-intro-text').hidden = !boss.intro;
+  el('boss-intro-back').hidden = !canStepBack;
 }
 
 export function bindBossIntro(handlers: { fight: () => void; back: () => void }): void {

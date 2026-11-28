@@ -50,6 +50,7 @@ export interface ContentSlots {
   landmark: Vec2 | null; // a standing point in front of the special landmark; non-null exactly when the dressing has one
   rest: Vec2 | null; // a standing point at the rest landmark (inn front or campfire); non-null exactly when the dressing has one
   shop: Vec2 | null; // where Elara stands, inside the solid box of the market stall; non-null exactly when the dressing has one
+  travel: Vec2 | null; // a standing point at the signpost; non-null exactly when the dressing has one
 }
 export interface AreaLayout {
   type: LocationType;

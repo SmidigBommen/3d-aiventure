@@ -23,6 +23,7 @@ export function campaignDressSpecs(): DressSpec[] {
         return {
           location: loc.name, type: loc.type, id: a.id, exits: a.connections,
           shop: s.includes('shop'), rest: s.includes('rest') || s.includes('inn') || s.includes('tavern'), boss: Boolean(a.boss), special: a.special ?? null,
+          travel: a.id === ((loc as { starting_area?: string }).starting_area ?? loc.areas[0].id),
         };
       }),
     ),

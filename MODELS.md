@@ -307,6 +307,16 @@ as before.
 | prisoner_cells | prisoner_rescue | `models/env/dungeon/fence_iron_bars.glb` |
 | malachars_laboratory | magical_research | `models/props/cabinet.glb` |
 
+### The travel signpost
+
+| Landmark | Where | File | Height |
+|---|---|---|---|
+| travel signpost (`landmark: 'travel'`) | the starting area of each of the 8 locations, every location type | `models/env/town/signpost.glb` | 2.6 |
+
+It is the same file as the trail marker of the wilderness search spot, which stands 1.1 m high. The player
+opens the map at it. The road of Lady Vex's ambush is dressed with the default wilderness theme
+(`ROAD_SPEC`) and needs no model of its own; its dirt road and the crown of the ending are plain geometry.
+
 ### Bosses in a fight
 
 A boss is drawn with its row of table 1 at its scale times 1.25 (`BOSS_SCALE`), also Lady Vex on the road.

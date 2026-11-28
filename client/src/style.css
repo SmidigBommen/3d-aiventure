@@ -265,3 +265,83 @@ h2 { font-size: 1.6rem; margin-bottom: 1rem; }
   75% { transform: translateX(-2px); }
   100% { background: transparent; transform: translateX(0); }
 }
+
+/* --- travel, journal, compass, arrival, ending --- */
+#hud-compass { position: absolute; top: 6.4rem; left: 50%; width: 0; height: 0; }
+#hud.in-battle #hud-compass { display: none; }
+#hud-compass > div { position: absolute; left: 0; top: 0; }
+.compass-ring { width: 92px; height: 92px; margin: -46px 0 0 -46px; border-radius: 50%; border: 1px solid rgba(212, 169, 74, 0.55); background: rgba(11, 10, 16, 0.45); }
+.compass-ahead { width: 0; height: 0; margin: -44px 0 0 -5px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid var(--gold); }
+.compass-north { font-family: var(--heading); font-size: 0.8rem; color: rgba(232, 220, 196, 0.7); }
+.compass-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink); border: 1px solid #0b0a10; }
+.compass-label { padding: 0.05rem 0.4rem; border-radius: 4px; background: rgba(11, 10, 16, 0.6); font-size: 0.78rem; white-space: nowrap; color: var(--ink); }
+.compass-dot.compass-shop { background: var(--gold); }
+.compass-label.compass-shop { color: var(--gold); }
+.compass-dot.compass-rest { background: #7bd88f; }
+.compass-label.compass-rest { color: #7bd88f; }
+.compass-dot.compass-boss { background: #ef5350; }
+.compass-label.compass-boss { color: #ff8a80; }
+.compass-dot.compass-travel { background: #6fb7ff; }
+.compass-label.compass-travel { color: #9fd0ff; }
+
+#arrival { position: fixed; top: 24%; left: 0; right: 0; text-align: center; pointer-events: none; text-shadow: 0 2px 12px #000, 0 0 3px #000; }
+#arrival.arriving { animation: arrival-in 2.5s ease-out forwards; }
+#arrival-title { font-family: var(--heading); font-weight: 700; font-size: 4rem; letter-spacing: 0.1em; color: var(--gold); }
+#arrival-subtitle { margin-top: 0.4rem; font-family: var(--heading); font-size: 1.4rem; letter-spacing: 0.12em; color: var(--ink); }
+@keyframes arrival-in { 0% { opacity: 0; transform: translateY(0.6rem); } 18% { opacity: 1; transform: none; } 80% { opacity: 1; } 100% { opacity: 0; } }
+
+#travel-panel { width: 66rem; }
+#travel-acts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; align-items: start; }
+@media (max-width: 900px) { #travel-acts { grid-template-columns: 1fr; } }
+.travel-act h3 { margin-top: 0.4rem; }
+.travel-act.locked h3 { opacity: 0.6; }
+.travel-reason { margin: 0 0 0.5rem; font-size: 0.85rem; font-style: italic; color: #ff8a80; }
+.travel-location { display: grid; grid-template-columns: 1.6rem 1fr; gap: 0.2rem 0.5rem; width: 100%; margin-bottom: 0.5rem; padding: 0.55rem 0.8rem; text-align: left; font: inherit; color: var(--ink); background: rgba(40, 32, 52, 0.9); border: 1px solid rgba(212, 169, 74, 0.5); border-radius: 6px; cursor: pointer; }
+.travel-location:hover, .travel-location:focus-visible { border-color: var(--gold); outline: none; }
+.travel-location.unavailable { opacity: 0.45; cursor: default; }
+.travel-location.current { opacity: 0.8; border-style: dashed; }
+.travel-key { grid-row: span 3; align-self: start; font-family: var(--heading); color: var(--gold); }
+.travel-name { font-family: var(--heading); letter-spacing: 0.03em; color: var(--gold); }
+.travel-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; grid-column: 2; }
+.travel-tag { padding: 0 0.45rem; border: 1px solid rgba(232, 220, 196, 0.35); border-radius: 999px; font-size: 0.75rem; }
+.travel-tag.boss { border-color: #ef5350; color: #ff8a80; }
+.travel-tag.cleared { border-color: #66bb6a; color: #7bd88f; }
+.travel-here { grid-column: 2; font-size: 0.85rem; font-style: italic; }
+
+#journal-campaign { margin: 0 0 0.4rem; text-align: center; font-style: italic; opacity: 0.85; }
+#journal-crown { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.8rem 1rem; border: 1px solid rgba(212, 169, 74, 0.5); border-radius: 999px 999px 12px 12px; background: rgba(212, 169, 74, 0.08); }
+.shard-socket { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0.3rem; font-size: 0.8rem; text-align: center; opacity: 0.55; }
+.shard-socket.found { opacity: 1; }
+.shard-gem { width: 1.3rem; height: 1.3rem; transform: rotate(45deg); border: 1px solid rgba(232, 220, 196, 0.5); background: rgba(11, 10, 16, 0.8); }
+.shard-socket.found .shard-gem { border-color: var(--gold); box-shadow: 0 0 0.7rem rgba(255, 255, 255, 0.35); }
+#journal-complete { margin: 0.8rem 0 0; text-align: center; color: #7bd88f; }
+.journal-act { margin-top: 0.9rem; padding: 0.7rem 0.9rem; border: 1px solid rgba(232, 220, 196, 0.2); border-radius: 8px; }
+.journal-act.current { border-color: rgba(212, 169, 74, 0.6); }
+.journal-act.locked { opacity: 0.6; }
+.journal-act-head { display: flex; align-items: baseline; gap: 0.7rem; }
+.journal-act-head h3 { flex: 1; margin: 0; }
+.journal-act-number { font-family: var(--heading); font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.8; }
+.journal-badge { padding: 0 0.5rem; border: 1px solid currentColor; border-radius: 999px; font-size: 0.75rem; }
+.badge-complete { color: #7bd88f; }
+.badge-in-progress { color: var(--gold); }
+.journal-description, .journal-quest, .journal-unknown { margin: 0.4rem 0; font-size: 0.92rem; line-height: 1.4; }
+.journal-unknown { font-style: italic; }
+.journal-bosses { margin: 0.4rem 0 0; padding: 0; list-style: none; }
+.journal-bosses li { display: flex; gap: 0.6rem; align-items: baseline; padding: 0.15rem 0; }
+.journal-bosses li.defeated .journal-boss-name { text-decoration: line-through; opacity: 0.7; }
+.journal-bosses li.defeated .journal-mark { color: #7bd88f; }
+.journal-mark { width: 1rem; color: #ff8a80; }
+.journal-boss-name { flex: 1; }
+.journal-boss-where { font-size: 0.82rem; opacity: 0.8; }
+#journal-deeds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; }
+.journal-deed { display: flex; flex-direction: column; align-items: center; padding: 0.4rem; border: 1px solid rgba(232, 220, 196, 0.2); border-radius: 6px; }
+.journal-deed .label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.8; }
+.journal-deed .value { font-family: var(--heading); font-size: 1.3rem; color: var(--gold); }
+
+#ending-panel { position: fixed; left: 50%; bottom: 6%; transform: translateX(-50%); width: 42rem; max-width: 90vw; padding: 1.4rem 2.4rem 1.6rem; background: rgba(18, 14, 24, 0.86); }
+#ending-kicker { margin: 0 0 0.2rem; font-family: var(--heading); font-size: 0.9rem; letter-spacing: 0.2em; text-transform: uppercase; opacity: 0.8; }
+#ending-heading { font-size: 2.2rem; }
+#ending-campaign { margin: 0.3rem 0 0; font-style: italic; opacity: 0.85; }
+#ending-text { margin: 0; font-size: 1.15rem; line-height: 1.6; }
+#ending-legend { margin: 0.8rem auto 0; max-width: 22rem; }
+#ending-continue { margin-top: 1.2rem; }

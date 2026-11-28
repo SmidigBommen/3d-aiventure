@@ -366,6 +366,6 @@ describe('dressSpecOf', () => {
       location: { name: 'Rivermeet Town', type: 'town' },
       area: { id: 'market', has_shop: true, can_rest: false, is_boss_area: false, special: 'shop_location' },
       exits: [{ id: 'town_square' }, { id: 'docks' }],
-    })).toEqual({ location: 'Rivermeet Town', type: 'town', id: 'market', exits: ['town_square', 'docks'], shop: true, rest: false, boss: false, special: 'shop_location' });
+    })).toEqual({ location: 'Rivermeet Town', type: 'town', id: 'market', exits: ['town_square', 'docks'], shop: true, rest: false, boss: false, special: 'shop_location', travel: false });
   });
 });

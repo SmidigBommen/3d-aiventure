@@ -153,7 +153,7 @@ describe("Elara's place", () => {
 });
 
 describe('the shop prompt', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null, rest: { x: -10, z: 10 }, shop: { x: -10, z: -10 } };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null, rest: { x: -10, z: 10 }, shop: { x: -10, z: -10 }, travel: null };
   const layout: AreaLayout = { ...buildLayout({ location: 'Nowhere', id: 'a', type: 'town', exits: [] }), slots };
   const contents = (over: Partial<AreaContents>): AreaContents => ({ seq: 1, monster: null, event: null, spent: null, boss: null, search_spot: false, ...over });
   const shop = { kind: 'shop', id: null, prompt: 'E: talk to Elara', auto: false, locked: false, x: -10, z: -10 };
@@ -175,7 +175,7 @@ describe('the shop prompt', () => {
   it('loses a tie to every other kind and wins when nearest', () => {
     const at = { x: 0, z: 0 };
     const mid = { x: 1, z: 0 };
-    const together: AreaLayout = { ...layout, slots: { monster: { x: 2, z: 0 }, event: { x: 2, z: 0 }, search: { x: 2, z: 0 }, boss: { x: 2, z: 0 }, landmark: null, rest: { x: 2, z: 0 }, shop: at } };
+    const together: AreaLayout = { ...layout, slots: { monster: { x: 2, z: 0 }, event: { x: 2, z: 0 }, search: { x: 2, z: 0 }, boss: { x: 2, z: 0 }, landmark: null, rest: { x: 2, z: 0 }, shop: at, travel: null } };
     const boss = { id: 'b', name: 'Boss', level: 3, locked: false, locked_text: null, title: '', intro: null };
     const event = { id: 'e', title: 'T', object: 'chest', label: 'a chest', landmark: false };
     expect(interactionAt(mid, together, contents({}))?.kind).toBe('rest');

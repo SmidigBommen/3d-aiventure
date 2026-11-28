@@ -7,15 +7,15 @@ from fastapi.templating import Jinja2Templates
 # Add parent directories to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from web.game_session import (
-    get_session, save_session, get_campaign, get_bosses, get_quests,
-)
+from web.game_session import get_session, save_session, get_bosses
 from web.dependencies import require_character
-from web import events, fight, world
-from engine import campaign as campaign_rules
+from web import events, fight, travel, world
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).parent.parent / "templates")
+
+# Where classic travel leads by its outcome
+TRAVEL_URLS = {"arrived": "/game", "ambush": "/battle", "defeat": "/battle/defeat"}
 
 # Chance that exploring without a fight turns up an event
 EVENT_CHANCE = 0.65
@@ -258,39 +258,16 @@ async def rest(request: Request, session=Depends(require_character)):
 @router.get("/travel", response_class=HTMLResponse)
 async def travel_menu(request: Request, session=Depends(require_character)):
     """Show available locations to travel to, grouped by unlocked act."""
-
-    campaign = get_campaign()
-    current_location = session.current_location
-    unlocked = campaign_rules.highest_unlocked_act(campaign, session.defeated_bosses)
-    bosses = get_bosses()
-
-    acts = []
-    for act in campaign["acts"]:
-        locations = []
-        for loc in act["locations"]:
-            if loc["name"] == current_location["name"]:
-                continue
-            boss_ids = [a["boss"] for a in loc.get("areas", []) if a.get("boss")]
-            locations.append({
-                "name": loc["name"],
-                "description": loc["description"],
-                "type": loc.get("type", ""),
-                "level_range": loc.get("encounterLevel"),
-                "has_boss": any(b in bosses and b not in session.defeated_bosses for b in boss_ids),
-                "cleared": bool(boss_ids) and all(b in session.defeated_bosses for b in boss_ids),
-            })
-        acts.append({
-            "number": act["number"],
-            "title": act["title"],
-            "locked": act["number"] > unlocked,
-            "locations": locations,
-        })
+    view = travel.travel_view(session)
+    # The page offers no journey to where the character already is
+    acts = [{**act, "locations": [loc for loc in act["locations"] if not loc["current"]]}
+            for act in view["acts"]]
 
     return templates.TemplateResponse(request, "game/travel.html", {
         "request": request,
         "title": "Travel",
         "character": session.serialize_character(),
-        "current_location": current_location,
+        "current_location": session.current_location,
         "acts": acts,
     })
 
@@ -301,117 +278,40 @@ async def travel_to_location(request: Request, location_name: str = Form(...), s
     if session.battle.is_active:
         return RedirectResponse("/battle", status_code=303)
 
-    campaign = get_campaign()
-    unlocked = campaign_rules.highest_unlocked_act(campaign, session.defeated_bosses)
-
-    for act in campaign["acts"]:
-        if act["number"] > unlocked:
-            continue
-        for location in act["locations"]:
-            if location["name"] != location_name:
-                continue
-            session.act = act
-            session.current_location = location
-            # Arrive at the location's entry point
-            areas = location.get("areas", [])
-            start_id = location.get("starting_area")
-            session.current_area = next(
-                (a for a in areas if a["id"] == start_id), areas[0] if areas else None)
-            world.roll_contents(session)
-
-            # The road is not always safe: a pursuing boss may strike mid-journey
-            ambush = campaign_rules.pending_ambush(get_bosses(), act, session.defeated_bosses)
-            if ambush and session.character.current_hit_points > 0:
-                from web.routes.battle import begin_boss_battle, end_battle
-                # The ambush is fought on the classic pages, on the road rather than at a boss's place
-                session.return_to_3d = False
-                if not begin_boss_battle(session, ambush, place="monster"):
-                    return await end_battle(request, session, player_won=False)
-                save_session(request, session)
-                return RedirectResponse("/battle", status_code=303)
-
-            save_session(request, session)
-            return RedirectResponse("/game", status_code=303)
-
-    return RedirectResponse("/game", status_code=303)
+    try:
+        # An ambush on this road is fought on the classic pages
+        result = travel.travel(session, location_name)
+    except fight.Rejected:
+        return RedirectResponse("/game", status_code=303)
+    save_session(request, session)
+    return RedirectResponse(TRAVEL_URLS[result], status_code=303)
 
 
 @router.get("/journal", response_class=HTMLResponse)
 async def journal(request: Request, session=Depends(require_character)):
     """The adventurer's journal: main quest, crown shards, bosses and deeds."""
-    campaign = get_campaign()
-    bosses = get_bosses()
-    defeated = session.defeated_bosses
-    unlocked = campaign_rules.highest_unlocked_act(campaign, defeated)
-    won_shards = campaign_rules.collected_shards(bosses, defeated)
-
-    acts = []
-    for act in campaign["acts"]:
-        act_bosses = []
-        for location in act["locations"]:
-            for area in location.get("areas", []):
-                boss_id = area.get("boss")
-                if boss_id in bosses:
-                    known = act["number"] <= unlocked
-                    act_bosses.append({
-                        "name": bosses[boss_id]["name"] if known else "???",
-                        "title": bosses[boss_id].get("title", "") if known else "",
-                        "where": f"{location['name']} — {area['name']}" if known else "Unknown",
-                        "level": bosses[boss_id]["level"],
-                        "defeated": boss_id in defeated,
-                    })
-        acts.append({
-            "number": act["number"],
-            "title": act["title"],
-            "description": act["description"],
-            "main_quest": act["mainQuest"],
-            "locked": act["number"] > unlocked,
-            "complete": campaign_rules.is_act_complete(act, defeated),
-            "current": act["number"] == unlocked,
-            "bosses": act_bosses,
-        })
-
-    all_quests = get_quests()
     return templates.TemplateResponse(request, "game/journal.html", {
         "request": request,
         "title": "Journal",
         "character": session.serialize_character(),
-        "campaign": {"title": campaign["title"], "description": campaign["description"]},
-        "acts": acts,
-        "shards": [{"name": s, "found": s in won_shards} for s in campaign_rules.all_shards(bosses)],
-        "campaign_complete": campaign_rules.is_campaign_complete(campaign, defeated),
-        "stats": {
-            "kills": session.monster_kills,
-            "bosses": len(defeated),
-            "events": session.events_resolved,
-            "quests": len(session.completed_quests),
-        },
-        "active_quests": [
-            {"name": all_quests[q]["name"], "progress": state["progress"],
-             "target": all_quests[q]["target_count"], "ready": state["status"] == "ready"}
-            for q, state in session.active_quests.items() if q in all_quests
-        ],
+        **travel.journal_view(session),
     })
 
 
 @router.get("/ending", response_class=HTMLResponse)
 async def ending(request: Request, session=Depends(require_character)):
     """Epilogue, shown once the campaign's final boss has fallen."""
-    campaign = get_campaign()
-    if not campaign_rules.is_campaign_complete(campaign, session.defeated_bosses):
+    try:
+        view = travel.ending_view(session)
+    except fight.Rejected:
         return RedirectResponse("/game", status_code=303)
 
     return templates.TemplateResponse(request, "game/ending.html", {
         "request": request,
-        "title": "The Crown Restored",
+        "title": view["title"],
         "character": session.serialize_character(),
-        "campaign": campaign,
-        "stats": {
-            "kills": session.monster_kills,
-            "bosses": len(session.defeated_bosses),
-            "events": session.events_resolved,
-            "quests": len(session.completed_quests),
-        },
+        "ending": view,
+        "stats": view["stats"],
     })
 
 

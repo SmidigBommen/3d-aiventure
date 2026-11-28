@@ -24,9 +24,15 @@
     <div class="hud-box" id="hud-asi" hidden></div>
     <div class="hud-box" id="hud-quests" hidden></div>
     <div class="hud-box" id="hud-quest-ready" hidden></div>
-    <div class="hud-box" id="hud-keys">WASD / arrows: move · Mouse: look (click the view) · E: interact · I: inventory · C: character · M or Esc: menu</div>
+    <div class="hud-box" id="hud-keys">WASD / arrows: move · Mouse: look (click the view) · E: interact · I: inventory · C: character · J: journal · M or Esc: menu</div>
+    <div id="hud-compass" hidden></div>
     <div id="notice" hidden></div>
     <div id="prompt" hidden></div>
+  </div>
+
+  <div id="arrival" hidden>
+    <div id="arrival-title"></div>
+    <div id="arrival-subtitle"></div>
   </div>
 
   <div id="loading" class="panel" hidden>Loading the area…</div>
@@ -136,13 +142,42 @@
       <div class="panel-foot"><span>1, 2, 3: tabs · Esc: close</span><button class="btn btn-small btn-quiet" id="shop-close" type="button">Close</button></div>
     </div>
 
+    <div id="travel-panel" class="panel sheet-like" hidden>
+      <h2>The Realm of Eldoria</h2>
+      <p class="panel-message" hidden></p>
+      <div id="travel-acts"></div>
+      <div class="panel-foot"><span>1 to 8: travel · Esc: close</span><button class="btn btn-small btn-quiet" id="travel-close" type="button">Close</button></div>
+    </div>
+
+    <div id="journal-panel" class="panel sheet-like" hidden>
+      <h2>Journal</h2>
+      <p id="journal-campaign"></p>
+      <h3>The Crown of Unity</h3>
+      <div id="journal-crown"></div>
+      <p id="journal-complete" hidden>The Crown is whole. Eldoria is at peace. <button class="btn btn-small" id="journal-ending" type="button">Relive the ending</button></p>
+      <div id="journal-acts"></div>
+      <div id="journal-quests" hidden></div>
+      <h3>Deeds</h3>
+      <div id="journal-deeds"></div>
+      <div class="panel-foot"><span>J or Esc: close · I: inventory · C: character</span><button class="btn btn-small btn-quiet" id="journal-close" type="button">Close</button></div>
+    </div>
+
+    <div id="ending-panel" class="panel" hidden>
+      <p id="ending-kicker">Epilogue</p>
+      <h2 id="ending-heading"></h2>
+      <p id="ending-campaign"></p>
+      <p id="ending-text"></p>
+      <div id="ending-legend"></div>
+      <button class="btn" id="ending-continue" type="button">Continue</button>
+    </div>
+
     <div id="menu" class="panel" hidden>
       <h2>Menu</h2>
       <nav>
-        <a id="menu-location" href="/game">Location (explore, travel)</a>
+        <a id="menu-location" href="/game">Location (classic page)</a>
         <button id="menu-inventory" type="button">Inventory</button>
         <button id="menu-character" type="button">Character</button>
-        <a id="menu-journal" href="/game/journal">Journal</a>
+        <button id="menu-journal" type="button">Journal</button>
         <a id="menu-saves" href="/saves">Saves</a>
       </nav>
       <button class="btn" id="menu-back" type="button">Back to the world</button>

@@ -152,7 +152,7 @@ describe('the standing point at the rest landmark', () => {
 });
 
 describe('the rest prompt', () => {
-  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null, rest: { x: -10, z: -10 }, shop: null };
+  const slots: ContentSlots = { monster: { x: 0, z: 0 }, event: { x: 10, z: 0 }, search: { x: 0, z: 10 }, boss: { x: 10, z: 10 }, landmark: null, rest: { x: -10, z: -10 }, shop: null, travel: null };
   const layout: AreaLayout = { type: 'town', floor: { halfX: 20, halfZ: 20 }, ceiling: null, walls: [], props: [], gates: [], spawn: { x: 5, z: 5 }, slots };
   const contents = (over: Partial<AreaContents>): AreaContents => ({ seq: 1, monster: null, event: null, spent: null, boss: null, search_spot: false, ...over });
   const rest = { kind: 'rest', id: null, prompt: 'E: rest', auto: false, locked: false, x: -10, z: -10 };

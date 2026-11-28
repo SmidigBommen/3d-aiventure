@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import {
-  fetchBattle, fetchCharacter, fetchEvent, fetchShop, fetchState, postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose,
-  postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postShopItem, postShopQuest, postUnequip,
-  type CharacterAnswer, type ShopAnswer, type WorldState,
+  fetchBattle, fetchCharacter, fetchEnding, fetchEvent, fetchJournal, fetchShop, fetchState, fetchTravel, postBattle, postBattleContinue, postBattleRevive,
+  postEngage, postEnter, postEventChoose, postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postShopItem, postShopQuest,
+  postTravel, postUnequip,
+  type Ambush, type CharacterAnswer, type ShopAnswer, type WorldState,
 } from './api';
 import { buildBattleScene, type BattleScene, type Rage } from './battle/battleScene';
 import { bossLook, enrageCue } from './battle/boss';
@@ -10,16 +11,24 @@ import { fxLook } from './battle/fx';
 import { bindBattlePanel, flash, floatText, renderBattle, setHp, showBanner, showBattlePanel, showEnrage, showResult } from './battle/panel';
 import { buildTimeline, type Cue, type Finale, type Timeline } from './battle/timeline';
 import { actionForKey, type BattleAction, type BattleView } from './battle/view';
+import { buildEndingScene } from './endingScene';
 import type { Vec2 } from './input/movement';
 import { buildTitleScene } from './titleScene';
-import { fade, hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showTitle, veil } from './ui';
+import { fade, hideHud, hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showRoadHud, showTitle, veil } from './ui';
 import { buildAreaScene, type AreaScene } from './world/areaScene';
+import {
+  ARRIVAL_SECONDS, arrivalTitle, endingSteps, travelChoiceForKey, travelChoices, type EndingView, type JournalView, type TravelView,
+} from './world/campaign';
+import {
+  bindEndingPanel, bindJournalPanel, bindTravelPanel, drawCompass, renderJournal, renderTravel, showArrival, showEnding, showJournalPanel, showTravelPanel,
+} from './world/campaignPanel';
 import { isFree } from './world/collision';
+import { compassMarks, type CompassMark } from './world/compass';
 import { buildContentScene, contentModels, underCeiling, type ContentScene } from './world/contentScene';
 import {
   battleStance, contentSolids, creatureLook, eventPlace, fightSlot, interactionAt, type AreaContents, type BossContent, type Interaction,
 } from './world/contents';
-import { dressArea, dressSpecOf, type Dressing, type Placement } from './world/dressing';
+import { ROAD_SPEC, dressArea, dressSpecOf, type Dressing, type Placement } from './world/dressing';
 import { choiceForKey, type EventResult, type EventView } from './world/event';
 import { bindBossIntro, bindEventPanel, renderEvent, renderEventResult, showBossIntro, showEventPanel } from './world/eventPanel';
 import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from './world/layout';
@@ -30,7 +39,9 @@ import { haggleFeedback, killAnnouncement, readyCount, tabForKey, type ShopTab, 
 import { bindShopPanel, renderShop, showHaggle, showShopPanel, type HaggleShown } from './world/shopPanel';
 import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
-type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro';
+type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro' | 'ending';
+/** The panels that open over the world while `screen` stays 'world'. */
+type OpenPanel = PanelKind | 'shop' | 'travel' | 'journal';
 
 /** An event in the world: its choices while it waits for one (`view`), then its outcome (`result`). */
 interface Happening {
@@ -66,6 +77,12 @@ interface Fight {
 // and there is no interaction or prompt; `inventory` and `sheet` are the views of the last answer.
 // `resting` is true from the E press at the rest landmark until the view has faded back in.
 // While Elara's shop is open `panel` is 'shop' and `shop` holds the view, the tab and the last haggle.
+// The map and the journal are panels too ('travel', 'journal'); `travel` and `journal` are the views of the
+// last answer. `travelling` is true from the choice of a destination until the view has faded back in,
+// `arrival` is what #arrival shows while it shows, `compass` the marks of the last frame while walking.
+// `road` is true while the road of an ambush is the scene: there `contents`, `interaction` and `compass`
+// are null and `state` is already the destination. During the epilogue `screen` is 'ending' and `ending`
+// holds the view and the step shown.
 declare global {
   interface Window {
     __aiv: {
@@ -86,7 +103,14 @@ declare global {
       readonly battle: Fight | null;
       readonly event: Happening | null;
       readonly intro: string | null;
-      readonly panel: PanelKind | 'shop' | null;
+      readonly panel: OpenPanel | null;
+      readonly travel: TravelView | null;
+      readonly journal: JournalView | null;
+      readonly arrival: { title: string; subtitle: string } | null;
+      readonly compass: CompassMark[] | null;
+      readonly road: boolean;
+      readonly ending: { view: EndingView; step: number } | null;
+      readonly travelling: boolean;
       readonly shop: Store | null;
       readonly inventory: InventoryView | null;
       readonly sheet: SheetView | null;
@@ -141,13 +165,25 @@ let introBoss: string | null = null; // the boss the introduction panel shows
 
 // The inventory and the character sheet: which of the two is on screen, and the views of the last answer.
 const REST_FADE_MS = 500;
-let panel: PanelKind | 'shop' | null = null;
+let panel: OpenPanel | null = null;
 let store: Store | null = null; // Elara's shop, while its panel is open
 let panelAsked = 0; // goes up with every opening and closing, so that an older answer opens nothing
 let panelLocked = false; // an action of a panel is on its way to the server
 let panelMessage: PanelMessage | null = null;
 let character: { inventory: InventoryView; sheet: SheetView } | null = null;
 let resting = false;
+
+// Travel, the journal and the ending.
+let atlas: TravelView | null = null; // the map of the last answer
+let journal: JournalView | null = null; // the journal of the last answer
+let travelling = false; // a journey is under way: the view is black or fading
+let road = false; // the scene is the road of an ambush, not the area the server holds
+let ambush: { boss: Ambush; battle: BattleView; state: WorldState } | null = null; // the ambush the introduction shows
+let arrival: { title: string; subtitle: string } | null = null;
+let arrivalTimer: number | undefined;
+let compass: CompassMark[] | null = null;
+let ending: { view: EndingView; step: number } | null = null;
+let epilogue: ReturnType<typeof buildEndingScene> | null = null; // the scene behind the ending
 
 const inWorld = (): boolean => screen === 'world' && layout !== null;
 // A panel is open over the area: the player stands where they stood and nothing walks.
@@ -162,11 +198,13 @@ const turn = (dYaw: number, dPitch: number): void => {
 const shown = (): boolean => (inWorld() || inFight() || inPanel()) && !loading;
 const landmarkOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'special') ?? null;
 const stallOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'shop') ?? null;
-const contentsOf = (s: WorldState | null): AreaContents | null => s?.contents ?? null;
+const signpostOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'travel') ?? null;
+// On the road of an ambush the state is already the destination's; nothing of what that area holds is here.
+const contentsOf = (s: WorldState | null): AreaContents | null => (road ? null : (s?.contents ?? null));
 const interactionNow = (): Interaction | null => (inWorld() && !loading && !panel && layout ? interactionAt(player, layout, contentsOf(state)) : null);
-const promptNow = (): string | null => (menuOpen || busy || crossing || resting ? null : (interactionNow()?.prompt ?? null));
-// Nobody walks, looks around or opens anything: a panel is on screen or the view is black for a rest.
-const heldStill = (): boolean => panel !== null || resting;
+const promptNow = (): string | null => (menuOpen || busy || crossing || resting || travelling ? null : (interactionNow()?.prompt ?? null));
+// Nobody walks, looks around or opens anything: a panel is on screen or the view is black for a rest or a journey.
+const heldStill = (): boolean => panel !== null || resting || travelling;
 
 window.__aiv = {
   ready: false,
@@ -194,6 +232,13 @@ window.__aiv = {
   get inventory() { return character?.inventory ?? null; },
   get sheet() { return character?.sheet ?? null; },
   get resting() { return resting; },
+  get travel() { return atlas; },
+  get journal() { return journal; },
+  get arrival() { return arrival; },
+  get compass() { return compass; },
+  get road() { return road; },
+  get ending() { return screen === 'ending' ? ending : null; },
+  get travelling() { return travelling; },
   lookAt(x, z) {
     if (!inWorld() || loading || heldStill()) return;
     const t = turnTowards(view, player, { x, z });
@@ -220,6 +265,10 @@ function leaveWorld(): void {
   showEventPanel(false);
   showBossIntro(null);
   closePanel();
+  closeEnding();
+  hideArrival();
+  road = false;
+  ambush = null;
   things?.dispose();
   things = null;
   area?.dispose();
@@ -298,6 +347,8 @@ async function enterArea(next: WorldState, cameFrom: string | null, at: { x: num
   area = buildAreaScene(dressed, next.exits, models);
   layout = dressed.layout;
   dressing = dressed;
+  road = false;
+  ambush = null;
   state = next;
   placeContents(contentsOf(next), figures);
   const start = at && walkLayout && isFree(at, walkLayout) ? at : spawnPoint(dressed.layout, cameFrom);
@@ -305,6 +356,36 @@ async function enterArea(next: WorldState, cameFrom: string | null, at: { x: num
   view = { yaw: start.yaw, pitch: 0 };
   screen = 'world';
   showHud(next, true);
+  setLoading(false);
+}
+
+/**
+ * Builds the road an ambush is fought on, in place of the area: the dressing of ROAD_SPEC with a dirt road from
+ * the player's place through the monster's. `next` is the state the server holds, which is the destination already.
+ */
+async function enterRoad(next: WorldState): Promise<void> {
+  const mine = ++entry;
+  setLoading(true);
+  if (screen === 'title') hideTitle();
+  const dressed = dressArea(buildLayout(ROAD_SPEC), ROAD_SPEC);
+  const models = await loadModels(dressed.placements.map((p) => p.model));
+  if (mine !== entry) return;
+  things?.dispose();
+  things = null;
+  area?.dispose();
+  const start = spawnPoint(dressed.layout, null);
+  const foe = dressed.layout.slots?.monster ?? { x: start.x, z: start.z - 1 };
+  area = buildAreaScene(dressed, [], models, { from: start, to: foe });
+  layout = dressed.layout;
+  dressing = dressed;
+  road = true;
+  state = next;
+  placeContents(null, new Map());
+  player = { x: start.x, z: start.z };
+  view = { yaw: Math.atan2(-(foe.x - start.x), -(foe.z - start.z)), pitch: 0 };
+  screen = 'world';
+  showHud(next, false);
+  showRoadHud();
   setLoading(false);
 }
 
@@ -362,7 +443,7 @@ async function refresh(): Promise<void> {
   const wasWalking = screen === 'world' || screen === 'event' || screen === 'intro';
   busy = false;
   const sameArea = (next: WorldState): boolean =>
-    wasWalking && next.area?.id === state?.area?.id && next.location?.name === state?.location?.name && !next.pending;
+    wasWalking && !road && next.area?.id === state?.area?.id && next.location?.name === state?.location?.name && !next.pending;
   try {
     let next = await fetchState();
     const walkable = next.has_character && !next.pending && next.location !== null && next.area !== null;
@@ -374,7 +455,7 @@ async function refresh(): Promise<void> {
     if (next.pending?.kind === 'event') {
       const now = await fetchEvent();
       if (now.ok && (now.event || now.result) && now.state.location && now.state.area) {
-        const here = layout !== null && (screen === 'world' || screen === 'event' || screen === 'intro')
+        const here = layout !== null && !road && (screen === 'world' || screen === 'event' || screen === 'intro')
           && now.state.area.id === state?.area?.id && now.state.location.name === state?.location?.name;
         if (!here) {
           hideTitle();
@@ -391,13 +472,17 @@ async function refresh(): Promise<void> {
     if (next.pending?.kind === 'battle' || next.pending?.kind === 'defeat') {
       const now = await fetchBattle();
       if (now.ok && (now.battle.phase === 'fight' || now.battle.phase === 'defeat') && now.state.location && now.state.area) {
-        const here = layout !== null && (screen === 'world' || screen === 'battle')
+        // An ambush is fought on the road, whatever area the server holds meanwhile.
+        const onRoad = now.battle.monster.place === 'road';
+        const here = layout !== null && road === onRoad && (screen === 'world' || screen === 'battle' || (onRoad && screen === 'intro'))
           && now.state.area.id === state?.area?.id && now.state.location.name === state?.location?.name;
         closeBattle();
+        if (screen === 'intro') closeIntro();
         if (!here) {
           hideTitle();
           await fontReady();
-          await enterArea(now.state, null);
+          if (onRoad) await enterRoad(now.state);
+          else await enterArea(now.state, null);
         }
         if (layout && now.state.area.id === state?.area?.id) await startBattle(now.battle, now.state);
         return;
@@ -536,6 +621,7 @@ async function startBattle(battle: BattleView, next: WorldState): Promise<void> 
   showPrompt(null);
   hideNotice();
   showHud(next, false);
+  if (road) showRoadHud();
 
   // A boss is drawn larger than its kind, and larger again in its rage; in a dungeon it stays under the ceiling.
   const look = bossId !== null ? bossLook(bossId, false) : creatureLook(battle.monster.race);
@@ -635,6 +721,11 @@ function advancePlayback(dt: number): void {
 /** Back to walking, from the battle stance, in the area as `next` describes it. */
 async function resumeWalk(next: WorldState): Promise<void> {
   closeBattle();
+  if (road) {
+    // The fight was on the road: the journey ends where it was going.
+    await finishJourney(next);
+    return;
+  }
   player = { x: stance.x, z: stance.z };
   view = { yaw: stance.yaw, pitch: stancePitch };
   screen = 'world';
@@ -680,6 +771,7 @@ async function proceed(): Promise<void> {
   busy = true;
   const mine = entry;
   const announcement = killAnnouncement(fight.view.rewards?.quest_updates ?? []);
+  const crowned = fight.view.rewards?.boss?.campaign_complete === true;
   const answer = await postBattleContinue();
   busy = false;
   if (mine !== entry) return;
@@ -687,6 +779,9 @@ async function proceed(): Promise<void> {
     await refresh();
     return;
   }
+  // The last boss has fallen: the epilogue, when the server agrees that the crown is whole.
+  if (crowned && await playEnding()) return;
+  if (mine !== entry) return;
   await resumeWalk(answer.state);
   // What the kill did for a quest, once more, now that the tracker shows it.
   if (announcement !== null) showNotice(announcement);
@@ -705,6 +800,10 @@ async function riseAgain(): Promise<void> {
     return;
   }
   closeBattle();
+  if (road) {
+    await finishJourney(answer.state);
+    return;
+  }
   screen = 'world';
   await enterArea(answer.state, null);
 }
@@ -832,6 +931,7 @@ function openIntro(boss: BossContent, at: Vec2): void {
 /** Step back: the panel closes and nothing has changed. */
 function closeIntro(): void {
   introBoss = null;
+  ambush = null;
   showBossIntro(null);
   if (screen === 'intro') screen = 'world';
 }
@@ -839,6 +939,13 @@ function closeIntro(): void {
 /** Fight: the challenge goes to the server and the fight starts. */
 async function fightBoss(): Promise<void> {
   if (screen !== 'intro' || introBoss === null) return;
+  if (ambush) {
+    // The fight began with the journey; here it is shown.
+    const met = ambush;
+    closeIntro();
+    await startBattle(met.battle, met.state);
+    return;
+  }
   const id = introBoss;
   closeIntro();
   await engage(id);
@@ -849,11 +956,11 @@ function introKey(event: KeyboardEvent): void {
   if (moveKey(event.code) || event.code === 'KeyE' || event.code === 'Space') event.preventDefault();
   if (event.repeat) return;
   if (['Enter', 'NumpadEnter', 'Space', 'KeyE'].includes(event.code)) void fightBoss();
-  else if (event.code === 'Escape') closeIntro();
+  else if (event.code === 'Escape' && !ambush) closeIntro(); // nobody steps back from an ambush
 }
 
 bindEventPanel({ choose: (index) => void chooseEvent(index), proceed: () => void proceedEvent() });
-bindBossIntro({ fight: () => void fightBoss(), back: () => closeIntro() });
+bindBossIntro({ fight: () => void fightBoss(), back: () => { if (!ambush) closeIntro(); } });
 
 /** Searches the area further: the server rolls again and the new contents take their slots. */
 async function search(): Promise<void> {
@@ -875,6 +982,15 @@ async function search(): Promise<void> {
 // --- inventory, character sheet and rest ---------------------------------------------------------
 
 function drawPanel(): void {
+  showTravelPanel(panel === 'travel');
+  showJournalPanel(panel === 'journal');
+  if (panel === 'travel' || panel === 'journal') {
+    showSheetPanel(null);
+    showShopPanel(false);
+    if (panel === 'travel' && atlas) renderTravel(atlas, panelMessage, panelLocked);
+    if (panel === 'journal' && journal) renderJournal(journal);
+    return;
+  }
   if (panel === 'shop') {
     if (!store) return;
     renderShop(store.view, store.tab, panelMessage, panelLocked);
@@ -897,10 +1013,12 @@ function closePanel(): void {
   store = null;
   showSheetPanel(null);
   showShopPanel(false);
+  showTravelPanel(false);
+  showJournalPanel(false);
 }
 
 /** Whether I, C and the menu entries open a panel now: walking in the world, nothing else going on. */
-const panelAllowed = (): boolean => inWorld() && !loading && !crossing && !busy && !resting;
+const panelAllowed = (): boolean => inWorld() && !loading && !crossing && !busy && !resting && !travelling && !road;
 
 /** Opens the inventory or the character sheet: asks the server and shows the panel when the answer is in. */
 async function openPanel(kind: PanelKind): Promise<void> {
@@ -925,9 +1043,10 @@ async function openPanel(kind: PanelKind): Promise<void> {
   if (document.pointerLockElement === canvas) document.exitPointerLock();
 }
 
-/** What I, C and the menu entries do: the key of the open panel closes it, the other one switches. */
-function togglePanel(kind: PanelKind): void {
+/** What I, C, J and the menu entries do: the key of the open panel closes it, another one switches. */
+function togglePanel(kind: PanelKind | 'journal'): void {
   if (panel === kind) closePanel();
+  else if (kind === 'journal') void openJournal();
   else void openPanel(kind);
 }
 
@@ -1029,6 +1148,194 @@ bindShopPanel({
 
 const wait = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
 
+// --- travel, the journal and the ending ------------------------------------------------------------
+
+/** Opens the map at the signpost: the player turns to it, the server is asked and the panel shows its answer. */
+async function openTravel(at: Vec2): Promise<void> {
+  if (!panelAllowed() || menuOpen) return;
+  const asked = ++panelAsked;
+  const mine = entry;
+  const answer = await fetchTravel();
+  if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
+  if (!answer.ok) {
+    showNotice(answer.message);
+    return;
+  }
+  const t = turnTowards(view, player, at);
+  turn(t.dYaw, t.dPitch);
+  atlas = answer.travel;
+  state = answer.state;
+  showHud(answer.state, false);
+  panel = 'travel';
+  panelLocked = false;
+  panelMessage = null;
+  held.clear();
+  showPrompt(null);
+  drawPanel();
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+
+/** What a location of the map does, by key or click: the journey, or the reason there is none. */
+function chooseTravel(location: string): void {
+  if (panel !== 'travel' || !atlas || panelLocked) return;
+  const choice = travelChoices(atlas).find((made) => made.location === location);
+  if (!choice) return;
+  if (!choice.enabled) {
+    panelMessage = { text: choice.reason ?? '', refused: true };
+    drawPanel();
+    return;
+  }
+  void travelTo(choice.location);
+}
+
+function hideArrival(): void {
+  window.clearTimeout(arrivalTimer);
+  arrival = null;
+  showArrival(null);
+}
+
+/** The name of the place and its act, large, for a moment. */
+function announceArrival(next: WorldState): void {
+  if (!next.location) return;
+  window.clearTimeout(arrivalTimer);
+  arrival = arrivalTitle({ location: next.location });
+  showArrival(arrival);
+  arrivalTimer = window.setTimeout(hideArrival, ARRIVAL_SECONDS * 1000);
+}
+
+/** The journey: the view goes black, the server moves the character, the new area (or the road of an ambush) is built, the view comes back. */
+async function travelTo(location: string): Promise<void> {
+  if (travelling || !inWorld() || loading) return;
+  travelling = true;
+  closePanel();
+  held.clear();
+  showPrompt(null);
+  hideNotice();
+  const mine = entry;
+  fade(true);
+  const [answer] = await Promise.all([postTravel(location), wait(REST_FADE_MS)]);
+  if (mine === entry) {
+    if (!answer.ok) {
+      showNotice(answer.message);
+    } else if (answer.ambush && answer.battle) {
+      atlas = answer.travel;
+      await enterRoad(answer.state);
+      if (layout && road) {
+        ambush = { boss: answer.ambush, battle: answer.battle, state: answer.state };
+        introBoss = answer.ambush.id;
+        screen = 'intro';
+        holdStill();
+        showBossIntro(answer.ambush, false);
+      }
+    } else if (answer.state.pending || !answer.state.area) {
+      apply(answer.state, false);
+    } else {
+      atlas = answer.travel;
+      await enterArea(answer.state, null);
+      if (screen === 'world' && state === answer.state) announceArrival(answer.state);
+    }
+  }
+  fade(false);
+  await wait(REST_FADE_MS);
+  travelling = false;
+}
+
+/** The end of a journey that an ambush interrupted: the view fades, the destination is entered and named. */
+async function finishJourney(next: WorldState): Promise<void> {
+  if (next.pending || !next.area) {
+    await refresh();
+    return;
+  }
+  travelling = true;
+  screen = 'world';
+  fade(true);
+  await wait(REST_FADE_MS);
+  await enterArea(next, null);
+  if (screen === 'world' && state === next) announceArrival(next);
+  fade(false);
+  await wait(REST_FADE_MS);
+  travelling = false;
+}
+
+bindTravelPanel({ choose: (location) => chooseTravel(location), close: () => closePanel() });
+
+/** Opens the journal: asks the server and shows the panel when the answer is in. */
+async function openJournal(): Promise<void> {
+  if (!panelAllowed() || menuOpen) return;
+  const asked = ++panelAsked;
+  const mine = entry;
+  const answer = await fetchJournal();
+  if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
+  if (!answer.ok) {
+    showNotice(answer.message);
+    return;
+  }
+  journal = answer.journal;
+  state = answer.state;
+  showHud(answer.state, false);
+  panel = 'journal';
+  panelLocked = false;
+  panelMessage = null;
+  store = null;
+  held.clear();
+  showPrompt(null);
+  drawPanel();
+  if (document.pointerLockElement === canvas) document.exitPointerLock();
+}
+
+function closeEnding(): void {
+  ending = null;
+  showEnding(null);
+  epilogue?.dispose();
+  epilogue = null;
+}
+
+/** Plays the epilogue when the server gives it. False (and nothing changed) when it does not. */
+async function playEnding(): Promise<boolean> {
+  const answer = await fetchEnding();
+  if (!answer.ok) return false;
+  leaveWorld();
+  epilogue = buildEndingScene(answer.ending.shards);
+  resize();
+  ending = { view: answer.ending, step: 0 };
+  state = answer.state;
+  screen = 'ending';
+  hideHud();
+  showEnding(ending.view, 0);
+  return true;
+}
+
+/** Continue in the epilogue: the next step, or after the last one the title screen. */
+function advanceEnding(): void {
+  if (screen !== 'ending' || !ending) return;
+  if (ending.step >= endingSteps(ending.view).length - 1) {
+    closeEnding();
+    void fetchState().then((next) => apply(next, false), () => apply(null, false));
+    return;
+  }
+  ending.step += 1;
+  showEnding(ending.view, ending.step);
+}
+
+/** "Relive the ending" in the journal. */
+async function reliveEnding(): Promise<void> {
+  if (panel !== 'journal' || panelLocked) return;
+  panelLocked = true;
+  if (!(await playEnding())) {
+    panelLocked = false;
+    showNotice('The crown is not yet whole.');
+  }
+}
+
+bindJournalPanel({ ending: () => void reliveEnding(), close: () => closePanel() });
+bindEndingPanel({
+  proceed: () => {
+    // The button keeps no focus, so that Space and Enter are not a click as well.
+    (document.activeElement as HTMLElement | null)?.blur();
+    advanceEnding();
+  },
+});
+
 /** Rests at the rest landmark: the view goes black, the server restores, the view comes back. */
 async function rest(): Promise<void> {
   if (busy || resting) return;
@@ -1053,6 +1360,7 @@ async function interact(): Promise<void> {
   const boss = hit.kind === 'boss' ? (contentsOf(state)?.boss ?? null) : null;
   if (hit.kind === 'rest') await rest();
   else if (hit.kind === 'shop') await openShop({ x: hit.x, z: hit.z });
+  else if (hit.kind === 'travel') await openTravel(signpostOf(dressing) ?? { x: hit.x, z: hit.z });
   else if (hit.kind === 'search') await search();
   else if (boss) openIntro(boss, { x: hit.x, z: hit.z });
   else if (hit.id !== null) await engage(hit.id);
@@ -1107,8 +1415,16 @@ window.addEventListener('keydown', (event) => {
     introKey(event);
     return;
   }
+  if (screen === 'ending') {
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+    if (['Enter', 'NumpadEnter', 'Space', 'KeyE'].includes(event.code)) {
+      event.preventDefault();
+      if (!event.repeat) advanceEnding();
+    }
+    return;
+  }
   if (!inWorld() || event.ctrlKey || event.altKey || event.metaKey) return;
-  if (resting) {
+  if (resting || travelling) {
     // The view is black: keys do nothing.
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
     return;
@@ -1122,7 +1438,16 @@ window.addEventListener('keydown', (event) => {
     else if (tab) shopTab(tab);
     return;
   }
-  const wanted = panelForKey(event.code);
+  if (panel === 'travel') {
+    // The map is open: 1 to 8 travel (or say why not) and Esc closes; nothing walks, and E, I, C, J and M do nothing.
+    if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
+    if (event.repeat) return;
+    const choice = atlas ? travelChoiceForKey(atlas, event.code) : null;
+    if (event.code === 'Escape') closePanel();
+    else if (choice) chooseTravel(choice.location);
+    return;
+  }
+  const wanted = event.code === 'KeyJ' ? 'journal' : panelForKey(event.code);
   if (panel) {
     // A panel is open: its own key or Esc closes it, the other key switches; nothing walks, E and M do nothing.
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
@@ -1159,11 +1484,12 @@ document.getElementById('menu-back')?.addEventListener('click', () => {
   requestLock();
 });
 
-// The menu entries of the two panels: the menu closes and the panel opens.
-for (const [id, kind] of [['menu-inventory', 'inventory'], ['menu-character', 'sheet']] as [string, PanelKind][]) {
+// The menu entries of the panels: the menu closes and the panel opens.
+for (const [id, kind] of [['menu-inventory', 'inventory'], ['menu-character', 'sheet'], ['menu-journal', 'journal']] as [string, PanelKind | 'journal'][]) {
   document.getElementById(id)?.addEventListener('click', () => {
     setMenu(false);
-    void openPanel(kind);
+    if (kind === 'journal') void openJournal();
+    else void openPanel(kind);
   });
 }
 
@@ -1187,7 +1513,7 @@ document.getElementById('btn-continue')?.addEventListener('click', async () => {
 
 function resize(): void {
   renderer.setSize(window.innerWidth, window.innerHeight, false);
-  for (const camera of [title.camera, eye]) {
+  for (const camera of [title.camera, eye, ...(epilogue ? [epilogue.camera] : [])]) {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
   }
@@ -1199,7 +1525,15 @@ const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
   const time = clock.elapsedTime;
-  if (inFight() && area) {
+  // The compass shows while the player walks or stands in an area; not in a fight, on the road or under a veil.
+  compass = inWorld() && !road && !loading && layout && state
+    ? compassMarks(layout, state.exits, contentsOf(state), { x: player.x, z: player.z, yaw: view.yaw })
+    : null;
+  drawCompass(compass, view.yaw);
+  if (screen === 'ending' && epilogue) {
+    epilogue.update(time);
+    renderer.render(epilogue.scene, epilogue.camera);
+  } else if (inFight() && area) {
     advancePlayback(dt);
     duel?.update(dt);
     // The view: on its way to the battle stance, then held there, moved only by what is played.
