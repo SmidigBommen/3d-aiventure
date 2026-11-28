@@ -239,6 +239,9 @@ let slotsFrom: 'menu' | 'title' = 'menu';
 let slotsMessage: PanelMessage | null = null;
 let slotsLocked = false; // a save, a load or a delete is on its way to the server
 
+// The title panel is on screen: plainly ('title'), or with the pending link when something is pending that
+// could not be opened here ('pending'). New game and Load game work in both.
+const atTitle = (): boolean => screen === 'title' || screen === 'pending';
 const inWorld = (): boolean => screen === 'world' && layout !== null;
 // A panel is open over the area: the player stands where they stood and nothing walks.
 const inPanel = (): boolean => (screen === 'event' || screen === 'intro') && layout !== null;
@@ -1462,11 +1465,11 @@ async function askPreview(): Promise<void> {
 
 /** New game on the title screen: the creation steps over the title scene. */
 async function openCreation(): Promise<void> {
-  if (screen !== 'title' || busy || slots) return;
+  if (!atTitle() || busy || slots) return;
   busy = true;
   const answer = await fetchCreation();
   busy = false;
-  if (screen !== 'title') return;
+  if (!atTitle()) return;
   if (!answer.ok) {
     showTitle(null);
     return;
@@ -1510,7 +1513,8 @@ function creationBack(): void {
   const before = prevStep(maker.step);
   if (before === null) {
     closeCreation();
-    screen = 'title';
+    // Back on the title panel as it was: with the pending link when something of the earlier game is pending.
+    screen = state?.pending ? 'pending' : 'title';
     showTitle(state, saveCount);
     return;
   }
@@ -1592,11 +1596,11 @@ function drawSaves(): void {
 
 /** Whether the save slots or the settings can open from where the player is: the menu, or the title screen. */
 const menuShown = (): boolean => inWorld() && menuOpen && !slots && !settingsOpen;
-const titleShown = (): boolean => screen === 'title' && !busy && !loading && !slots;
+const titleShown = (): boolean => atTitle() && !busy && !loading && !slots;
 
 /** Opens the save slots: from the menu to save or load, from the title screen to load. */
 async function openSaves(mode: SavesMode): Promise<void> {
-  const from = screen === 'title' ? 'title' : 'menu';
+  const from = atTitle() ? 'title' : 'menu';
   const allowed = from === 'title' ? titleShown : menuShown;
   if (!allowed()) return;
   const answer = await fetchSaves();

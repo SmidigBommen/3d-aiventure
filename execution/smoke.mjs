@@ -875,6 +875,44 @@ async function quitToTitle() {
   await shot('title-after-quit');
 }
 
+/**
+ * With --serve: the title screen while something is pending that the client cannot open here (an event the
+ * data no longer has). New game and Load game work there as on the plain title screen. Ends on the plain one.
+ */
+async function pendingTitle() {
+  const made = await postJson('/api/saves', {});
+  editSession((session) => {
+    session.pending_event = 'smoke-no-such-event';
+  });
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'pending', null, { timeout: 30000 });
+  for (const id of ['#btn-new-game', '#btn-load-game', '#pending-link']) if (!(await page.isVisible(id))) errors.push(`title-pending: ${id} is not offered`);
+  if (await page.isVisible('#btn-continue')) errors.push('title-pending: Continue is offered with something pending');
+  await shot('title-pending');
+
+  await page.click('#btn-load-game');
+  await page.waitForFunction(() => window.__aiv.saves?.mode === 'load' && !document.getElementById('saves-panel').hidden, null, { timeout: 10000 })
+    .catch(() => errors.push('title-pending: Load game does not open the save slots'));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__aiv.saves === null && !document.getElementById('title-screen').hidden, null, { timeout: 5000 })
+    .catch(() => errors.push('title-pending: Esc does not lead back from the save slots to the title screen'));
+
+  await page.click('#btn-new-game');
+  await page.waitForFunction(atStep, 'race', { timeout: 10000 }).catch(() => errors.push('title-pending: New game does not open creation'));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__aiv.screen === 'pending' && window.__aiv.creation === null && !document.getElementById('title-screen').hidden, null, { timeout: 5000 })
+    .catch(() => errors.push('title-pending: Esc does not lead back from creation to the title screen'));
+  if (!(await page.isVisible('#pending-link'))) errors.push('title-pending: the pending link is gone after creation was left');
+
+  editSession((session) => {
+    session.pending_event = null;
+  });
+  await postJson(`/api/saves/${made.body.save_id}/delete`, {});
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'title', null, { timeout: 30000 });
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
+}
+
 try {
   // 1. The 3D client loads and draws; without a character it offers a new game.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
@@ -915,6 +953,7 @@ try {
   await settingsSteps();
   await saveSteps();
   await quitToTitle();
+  if (serve) await pendingTitle();
 
   // 5. Into the world again with Continue.
   const start = await enterWorld();
