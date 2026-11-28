@@ -1,4 +1,4 @@
-"""The backpack and what is worn, as functions of a session: shared by the classic routes and the JSON API.
+"""The backpack and what is worn, as functions of a session, called by the JSON API.
 
 No Request, no saving, no redirect. An action returns the line for the player or raises
 fight.Rejected(code, message) before anything changed.

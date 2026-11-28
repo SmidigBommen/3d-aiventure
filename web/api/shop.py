@@ -1,7 +1,6 @@
 """JSON API of Elara's shop and quest board in the 3D world.
 
-Every action is the function of web/shop.py that the classic route calls. The API sets no flash
-message and leaves `haggle_result` alone: the roll comes back in the answer.
+Every action is a function of web/shop.py. The roll of a haggle comes back in the answer.
 """
 
 from fastapi import APIRouter, Request

@@ -9,7 +9,7 @@ export type SoundCue =
   | 'hit' | 'crit' | 'miss' | 'heal' | 'defend' | 'spell' | 'victory' | 'defeat' | 'levelup' | 'coin' | 'click' | 'save'
   | 'step_stone' | 'step_grass' | 'step_dungeon' | 'gate' | 'prompt' | 'notice' | 'enrage' | 'shard';
 
-/** The twelve classic effects (web/static/js/main.js: SFX), then the eight that are new in the 3D client. */
+/** The twelve effects of menus and fights, then the eight of walking and the world. */
 export const SOUND_CUES: readonly SoundCue[] = [
   'hit', 'crit', 'miss', 'heal', 'defend', 'spell', 'victory', 'defeat', 'levelup', 'coin', 'click', 'save',
   'step_stone', 'step_grass', 'step_dungeon', 'gate', 'prompt', 'notice', 'enrage', 'shard',
@@ -19,7 +19,7 @@ export const SOUND_CUES: readonly SoundCue[] = [
 const KINDS = ['attack', 'ability', 'defend', 'item', 'flee', 'stunned', 'condition', 'enrage'];
 const OUTCOMES = ['hit', 'crit', 'miss', 'half'];
 
-/** The cue of one turn event. Attacks, abilities, defend and items sound as the classic battle stage plays them. */
+/** The cue of one turn event. An attack, an ability, a defence and an item each have their own. */
 export function turnEventSound(event: TurnEvent): SoundCue {
   const kind = KINDS.includes(event.kind) ? event.kind : 'condition';
   const outcome = OUTCOMES.includes(event.outcome as string) ? event.outcome : null;

@@ -1,5 +1,5 @@
 """Inventory, character sheet and rest in the 3D world: /api/character, /api/inventory/*, /api/rest.
-Both interfaces must do the same thing to the same session."""
+A route must do to the session what its shared function does."""
 
 import copy
 import json
@@ -21,7 +21,7 @@ from skills import SKILLS, calculate_skill_modifier
 import web.game_session as game_session
 from web.app import app
 from web.game_session import GameSession
-from web import world
+from web import creation, fight, inventory, save_manager, sheet, world
 
 CAMPAIGN = game_session.get_campaign()
 CLASSES = game_session.get_classes()
@@ -43,15 +43,17 @@ REST_MESSAGE = "You rest. Hit points and power points are restored."
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(game_session, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(save_manager, "SAVES_DIR", tmp_path / "saves")
     with TestClient(app) as c:
-        c.sessions_dir = tmp_path
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Fighter"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
+        c.sessions_dir = sessions
+        assert c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+            "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
             "skills": ["Athletics", "Perception"],
-        })
+        }).status_code == 200
         yield c
 
 
@@ -135,25 +137,36 @@ def seeded(client, seed):
     return write(client, data)
 
 
+FUNCTIONS = {
+    "/api/inventory/use": inventory.use_potion,
+    "/api/inventory/equip-weapon": inventory.equip_weapon,
+    "/api/inventory/equip-armor": inventory.equip_armor,
+    "/api/inventory/unequip-weapon": inventory.unequip_weapon,
+    "/api/inventory/unequip-armor": inventory.unequip_armor,
+    "/api/character/improve": sheet.improve,
+    "/api/rest": world.rest,
+}
+
+
 def actions(length):
     made = []
     for route in ("use", "equip-weapon", "equip-armor"):
         for index in range(-1, length + 1):
-            made.append((f"/inventory/{route}", {"item_index": index}))
-    made += [("/inventory/unequip-weapon", {}), ("/inventory/unequip-armor", {})]
-    made += [("/character/improve", {"ability": ability}) for ability in (*ABILITIES, "luck")]
-    made.append(("/game/rest", {}))
+            made.append((f"/api/inventory/{route}", {"item_index": index}))
+    made += [("/api/inventory/unequip-weapon", {}), ("/api/inventory/unequip-armor", {})]
+    made += [("/api/character/improve", {"ability": ability}) for ability in (*ABILITIES, "luck")]
+    made.append(("/api/rest", {}))
     return made
 
 
-def api_path(classic):
-    return {"/character/improve": "/api/character/improve", "/game/rest": "/api/rest"}.get(classic, "/api" + classic)
-
-
-def without_flash(text):
-    data = json.loads(text)
-    data.pop("_flash", None)
-    return data
+def through_function(text, route, fields):
+    """What the shared function of `route` does to the session `text`: the session after, the line, the refusal."""
+    session = GameSession.from_dict(json.loads(text))
+    try:
+        message = FUNCTIONS[route](session, *fields.values())
+    except fight.Rejected as rejection:
+        return session.to_dict(), None, rejection
+    return session.to_dict(), message, None
 
 
 def test_parity_refusals_and_successes(client):
@@ -162,62 +175,59 @@ def test_parity_refusals_and_successes(client):
         s0 = seeded(client, seed)
         path = session_file(client)
         length = len(json.loads(s0)["character"]["inventory"])
-        for classic, fields in actions(length):
+        for route, fields in actions(length):
+            a, message, rejection = through_function(s0, route, fields)
             path.write_text(s0)
-            client.post(classic, data=fields, follow_redirects=False)
-            a = path.read_text()
-            path.write_text(s0)
-            response = client.post(api_path(classic), json=fields)
+            response = client.post(route, json=fields)
             b = path.read_text()
-            where = (seed, classic, fields)
-            assert without_flash(a) == without_flash(b), where
-            assert json.loads(b).get("_flash") == json.loads(s0).get("_flash"), where
+            where = (seed, route, fields)
+            assert a == json.loads(b), where
+            assert (response.status_code == 200) is (rejection is None), where
             body = response.json()
             if response.status_code == 200:
                 assert set(body) == {"inventory", "sheet", "state", "message"}, where
-                assert isinstance(body["message"], str) and body["message"], where
+                assert isinstance(body["message"], str) and body["message"] == message, where
                 again = client.get("/api/character").json()
                 assert again == {**body, "message": None}, where
             else:
-                assert set(body) == {"error", "message"}, where
+                assert body == {"error": rejection.code, "message": rejection.message}, where
                 assert response.status_code == STATUS.get(body["error"], 409), where
                 assert b == s0, where
-                assert without_flash(a) == without_flash(s0), where
+                assert a == json.loads(s0), where
                 code = body["error"]
                 if code == "not_proficient":
-                    code += classic
+                    code += route
                 seen.add(code)
     if len(SEEDS) >= 100:
         assert seen >= {"no_such_item", "full_health", "not_a_weapon", "not_armor",
-                        "not_proficient/inventory/equip-weapon", "not_proficient/inventory/equip-armor",
+                        "not_proficient/api/inventory/equip-weapon", "not_proficient/api/inventory/equip-armor",
                         "nothing_equipped", "no_such_ability", "no_points", "score_at_cap", "cannot_rest"}
 
 
-def test_views_match_the_classic_pages(client):
+def test_views_match_the_session(client):
     for seed in SEEDS:
         s0 = seeded(client, seed)
         body = client.get("/api/character").json()
         assert session_file(client).read_text() == s0
-        ctx = client.get("/inventory").context
-        assert body["inventory"]["items"] == ctx["character"]["inventory"]
-        assert body["inventory"]["weapon"] == ctx["character"]["weapon_details"]
-        assert body["inventory"]["armor"] == ctx["character"]["armor_details"]
-        assert body["inventory"]["armor_class"] == ctx["character"]["armor_class"]
-
-        ctx = client.get("/character/summary").context
-        sheet = body["sheet"]
         session = GameSession.from_dict(json.loads(s0))
+        shown = session.serialize_character()
+        assert body["inventory"]["items"] == inventory.annotated_items(session, session.serialize_character())
+        assert body["inventory"]["weapon"] == shown["weapon_details"]
+        assert body["inventory"]["armor"] == shown["armor_details"]
+        assert body["inventory"]["armor_class"] == shown["armor_class"] == session.character.armor_class
+
+        sheet = body["sheet"]
         character = session.character
         serialized = session.serialize_character()
         props = CLASSES[character.class_name]
-        expected = {key: ctx["character"][key] for key in (
+        expected = {key: serialized[key] for key in (
             "name", "race", "class_name", "level", "portrait", "xp", "xp_to_next_level", "gold",
             "current_hit_points", "max_hit_points", "power_points", "max_power_points", "armor_class",
             "weapon", "armor", "asi_points", "ability_score_cap",
             *(f"{a}_{part}" for a in ABILITIES for part in ("score", "modifier")))}
         expected.update({
-            "primary_ability": ctx["primary_ability"],
-            "unarmored_defense": ctx["unarmored_defense"],
+            "primary_ability": props.get("primary_ability", "").lower(),
+            "unarmored_defense": (props.get("unarmored_defense") or "").lower(),
             "improvable": [a for a in ABILITIES if serialized[f"{a}_score"] < 20]
                           if serialized["asi_points"] > 0 else [],
             "proficiency_bonus": character.proficiency_bonus,
@@ -370,7 +380,7 @@ def pending_setups():
     return {
         "battle": lambda data: data["battle"].update(is_active=True),
         "defeat": lambda data: data["character"].update(current_hit_points=0),
-        "event": lambda data: data.update(pending_event="abandoned_campsite"),
+        "event": lambda data: data.update(pending_event="abandoned_chest"),
     }
 
 
@@ -399,7 +409,7 @@ def test_bodies_and_pending(client, kind):
 
 
 def test_reading_writes_nothing(client):
-    before = edit(client, lambda data: data.update(_flash={"inventory_message": "Kept.", "improve_message": "Kept."}))
+    before = edit(client, lambda data: None)
     body = client.get("/api/character").json()
     assert set(body) == {"inventory", "sheet", "state", "message"} and body["message"] is None
     assert set(body["inventory"]) == {"weapon", "armor", "armor_class", "items"}

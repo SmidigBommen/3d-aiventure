@@ -1,4 +1,4 @@
-"""Elara's shop and her quest board, as functions of a session: shared by the classic routes and the JSON API.
+"""Elara's shop and her quest board, as functions of a session, called by the JSON API.
 
 No Request, no saving, no redirect. An action returns {"message", "context", "haggle"}: the line
 for the player, the context of Elara's answer and the roll of a haggle. It raises
@@ -37,7 +37,7 @@ def _rejected(code: str, message: str) -> Exception:
 
 
 def get_shopkeeper_dialog(context: str, character_gold: int = 0) -> str:
-    """Get a context-appropriate shopkeeper dialog line (the classic page's choice)."""
+    """Get a context-appropriate shopkeeper dialog line."""
     shopkeeper = get_shopkeeper()
     if context in shopkeeper:
         return random.choice(shopkeeper[context])

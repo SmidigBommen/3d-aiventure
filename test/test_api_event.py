@@ -1,5 +1,6 @@
 """Events and bosses in the 3D world: /api/event, the event in the engage answer, what an area
-keeps of a resolved event, and the boss keys of the battle view. Both interfaces must play the same game."""
+keeps of a resolved event, and the boss keys of the battle view. The routes must play the game of the
+shared functions."""
 
 import json
 import os
@@ -19,7 +20,9 @@ from engine.events import scaled_dc
 from skills import calculate_skill_modifier
 import web.game_session as game_session
 from web.app import app
-from web.routes.game import location_tier
+from web import creation, events, fight, save_manager, travel
+from web.events import location_tier
+from web.game_session import GameSession
 
 CAMPAIGN = game_session.get_campaign()
 EVENTS = game_session.get_events()
@@ -52,14 +55,16 @@ def where_for(event_id):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(game_session, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(save_manager, "SAVES_DIR", tmp_path / "saves")
     with TestClient(app) as c:
-        c.sessions_dir = tmp_path
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Fighter"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
-            "skills": ["Athletics", "Perception"]})
+        c.sessions_dir = sessions
+        assert c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+            "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
+            "skills": ["Athletics", "Perception"]}).status_code == 200
         c.base = load(c)
         yield c
 
@@ -70,6 +75,11 @@ def _path(client) -> Path:
 
 def load(client) -> dict:
     return json.loads(_path(client).read_text(encoding="utf-8"))
+
+
+def stored(session) -> GameSession:
+    """The session as the next request reads it: written and read again."""
+    return GameSession.from_dict(json.loads(json.dumps(session.to_dict())))
 
 
 def contents(where, monster=None, event=None):
@@ -101,21 +111,22 @@ def refused(client, response, status, code, before):
 
 class TestEventParity:
     @pytest.mark.parametrize("event_id", sorted(EVENTS))
-    def test_api_resolves_as_the_classic_route_does(self, client, event_id):
+    def test_api_resolves_as_the_shared_function_does(self, client, event_id):
         where = where_for(event_id)
         for index in range(len(EVENTS[event_id]["choices"])):
             for seed in SEEDS:
                 place(client, where, pending_event=event_id)
+                session = GameSession.from_dict(load(client))
                 random.seed(seed)
-                client.post("/game/event/choose", data={"choice": index}, follow_redirects=False)
-                classic = load(client)
-                fights = classic["event_result"]["battle"]
+                events.choose(session, index)
+                shared = json.loads(json.dumps(session.to_dict()))
+                fights = shared["event_result"]["battle"]
                 if fights:
-                    answer = client.post("/game/event/continue", follow_redirects=False)
-                    assert answer.headers["location"] == "/battle/start"
+                    session = stored(session)
                     random.seed(seed + 1000)
-                    client.get("/battle/start", follow_redirects=False)
-                    classic_after = load(client)
+                    phase = events.carry_on(session)
+                    assert phase in ("fight", "defeat", "world")
+                    shared_after = json.loads(json.dumps(session.to_dict()))
 
                 place(client, where, pending_event=event_id)
                 random.seed(seed)
@@ -124,22 +135,22 @@ class TestEventParity:
                 result = answer.json()["result"]
                 api = load(client)
                 for key in RESULT_KEYS:
-                    assert result[key] == classic["event_result"][key], key
-                assert result["leveled_up"] == classic["event_result"].get("leveled_up", False)
-                assert result["new_level"] == classic["event_result"].get("new_level")
+                    assert result[key] == shared["event_result"][key], key
+                assert result["leveled_up"] == shared["event_result"].get("leveled_up", False)
+                assert result["new_level"] == shared["event_result"].get("new_level")
                 for key in ("character", "completed_events", "events_resolved", "pending_event"):
-                    assert api[key] == classic[key], key
+                    assert api[key] == shared[key], key
                 if fights:
                     random.seed(seed + 1000)
                     after = client.post("/api/event/continue").json()
                     api_after = load(client)
-                    assert api_after["battle"] == classic_after["battle"]
-                    assert api_after["character"] == classic_after["character"]
+                    assert api_after["battle"] == shared_after["battle"]
+                    assert api_after["character"] == shared_after["character"]
                     if api_after["battle"]["is_active"]:
-                        assert after["battle"]["phase"] == "fight"
+                        assert after["battle"]["phase"] == "fight" == phase
                         expected = "landmark" if EVENTS[event_id].get("special") else "event"
                         assert after["battle"]["monster"]["place"] == expected
-                        assert classic_after.get("battle_place", "monster") == "monster"
+                        assert shared_after["battle_place"] == api_after["battle_place"] == expected
                     else:
                         # No fight can start here, or the opening blow ended it
                         fallen = api_after["character"]["current_hit_points"] <= 0
@@ -147,13 +158,13 @@ class TestEventParity:
 
 
 class TestEventView:
-    def test_choices_carry_the_numbers_of_the_classic_page(self, client):
+    def test_choices_carry_the_numbers_of_the_check(self, client):
         where = "Whispering Woods/entrance"
         place(client, where, pending_event="abandoned_chest")
         before = _path(client).read_bytes()
         answer = client.get("/api/event").json()
         assert _path(client).read_bytes() == before
-        assert answer["result"] is None and answer["state"]["pending"]["kind"] == "event"
+        assert answer["result"] is None and answer["state"]["pending"] == {"kind": "event"}
         view = answer["event"]
         assert {key: view[key] for key in ("id", "title", "text", "object", "label", "landmark")} == {
             "id": "abandoned_chest", "title": EVENTS["abandoned_chest"]["title"],
@@ -188,6 +199,20 @@ class TestEventView:
         place(client, "Whispering Woods/entrance")
         answer = client.get("/api/event").json()
         assert answer["event"] is None and answer["result"] is None
+
+    def test_a_stale_event_id_is_not_pending(self, client):
+        where = "Whispering Woods/entrance"
+        place(client, where, pending_event="no_such_event_any_more")
+        before = _path(client).read_bytes()
+        state = client.get("/api/state").json()
+        assert state["pending"] is None
+        answer = client.get("/api/event").json()
+        assert answer["event"] is None and answer["result"] is None and answer["state"]["pending"] is None
+        assert _path(client).read_bytes() == before
+        refused(client, client.post("/api/event/choose", json={"choice": 0}), 409, "no_event", before)
+        moved = client.post("/api/move", json={"area_id": state["exits"][0]["id"]})
+        assert moved.status_code == 200 and moved.json()["area"]["id"] == state["exits"][0]["id"]
+        assert moved.json()["pending"] is None
 
 
 class TestRefusals:
@@ -228,7 +253,8 @@ class TestEngageAndSpent:
         assert state["contents"]["event"]["landmark"] is landmark and state["contents"]["spent"] is None
 
         answer = client.post("/api/engage", json={"id": event_id}).json()
-        assert answer["url"] == "/game/event" and answer["battle"] is None
+        assert set(answer) == {"state", "battle", "event"} and answer["battle"] is None
+        assert answer["state"]["pending"] == {"kind": "event"}
         assert answer["event"] == client.get("/api/event").json()["event"]
         assert answer["event"]["landmark"] is landmark
 
@@ -275,7 +301,7 @@ class TestFightFromEvent:
         answer = client.post("/api/event/continue").json()
         assert answer["event"] is None and answer["result"] is None
         assert answer["battle"]["phase"] == "fight" and answer["battle"]["monster"]["place"] == "event"
-        assert answer["state"]["pending"]["kind"] == "battle"
+        assert answer["state"]["pending"] == {"kind": "battle"}
         assert load(client)["battle_place"] == "event"
         assert client.get("/api/battle").json()["battle"] == answer["battle"]
 
@@ -309,26 +335,38 @@ def start_state(boss_id):
     return fallen, f"{loc['name']}/{area['id']}"
 
 
-def start_boss(client, boss_id, seed, classic):
+def start_boss(client, boss_id, seed):
+    """The boss fight begun through the API (Lady Vex: by the journey she ambushes). Returns the battle view."""
     fallen, where = start_state(boss_id)
     place(client, where, defeated_bosses=fallen, char_level=BOSSES[boss_id]["level"],
           char_max_hit_points=9999, char_current_hit_points=9999)
     random.seed(seed)
     if boss_id == "Lady Vex":
-        answer = client.post("/game/travel", data={"location_name": "Emberforge Mountains"}, follow_redirects=False)
-        assert answer.headers["location"] == "/battle"
-    elif classic:
-        client.post("/battle/boss", follow_redirects=False)
+        answer = client.post("/api/travel", json={"location": "Emberforge Mountains"}).json()
+        assert answer["ambush"]["id"] == "Lady Vex"
+        return answer["battle"]
+    return client.post("/api/engage", json={"id": boss_id}).json()["battle"]
+
+
+def start_boss_by_function(client, boss_id, seed):
+    """The same beginning through the shared functions, on a session that is not written. Returns the session."""
+    fallen, where = start_state(boss_id)
+    place(client, where, defeated_bosses=fallen, char_level=BOSSES[boss_id]["level"],
+          char_max_hit_points=9999, char_current_hit_points=9999)
+    session = GameSession.from_dict(load(client))
+    random.seed(seed)
+    if boss_id == "Lady Vex":
+        assert travel.travel(session, "Emberforge Mountains") == "ambush"
     else:
-        return client.post("/api/engage", json={"id": boss_id}).json()["battle"]
-    return client.get("/api/battle").json()["battle"]
+        assert fight.opened(session, fight.begin_boss_battle(session, boss_id)) == "fight"
+    return stored(session)
 
 
 class TestBossParity:
     @pytest.mark.parametrize("boss_id", sorted(BOSSES))
-    def test_both_interfaces_play_the_same_fight(self, client, boss_id):
+    def test_the_routes_play_the_fight_of_the_shared_functions(self, client, boss_id):
         for seed in SEEDS:
-            views = [start_boss(client, boss_id, seed, classic=False)]
+            views = [start_boss(client, boss_id, seed)]
             actions = []
             while views[-1]["phase"] == "fight" and len(actions) < 400:
                 k = len(actions)
@@ -351,7 +389,7 @@ class TestBossParity:
             for view in views[:-1]:
                 assert view["can_flee"] is False
                 assert view["monster"]["enrage_text"] == boss["enrage_text"]
-                assert view["monster"]["place"] == ("monster" if boss_id == "Lady Vex" else "boss")
+                assert view["monster"]["place"] == ("road" if boss_id == "Lady Vex" else "boss")
                 said = [line["text"] for line in view["log"]
                         if line["text"].startswith(f'{boss["name"]}: "') and line["text"].endswith('"')]
                 expected = said[-1][len(boss["name"]) + 3:-1] if said else boss["taunts"]["start"][0]
@@ -360,17 +398,20 @@ class TestBossParity:
             won = views[-1]["rewards"]["boss"]
             assert won["shard"] == boss.get("shard") and won["defeat_text"] == boss["defeat_text"]
 
-            assert start_boss(client, boss_id, seed, classic=True) == views[0]
+            session = start_boss_by_function(client, boss_id, seed)
+            assert fight.battle_view(session) == views[0]
             for k, ability_id in enumerate(actions):
                 random.seed(seed * 1000 + k)
                 if ability_id:
-                    client.post("/battle/ability", data={"ability_id": ability_id}, follow_redirects=False)
+                    phase = fight.use_ability(session, ability_id)
                 else:
-                    client.post("/battle/attack", follow_redirects=False)
-                assert client.get("/api/battle").json()["battle"] == views[k + 1], (seed, k)
-            classic_file = load(client)
+                    phase = fight.attack(session)
+                session = stored(session)
+                assert phase == views[k + 1]["phase"], (seed, k)
+                assert fight.battle_view(session) == views[k + 1], (seed, k)
+            shared_file = session.to_dict()
             for key in ("character", "defeated_bosses", "battle_rewards"):
-                assert classic_file[key] == api_file[key], key
+                assert shared_file[key] == api_file[key], key
 
 
 class TestBossView:
@@ -383,34 +424,42 @@ class TestBossView:
         assert shown["title"] == BOSSES[boss_id].get("title", "") and shown["intro"] == BOSSES[boss_id]["intro"]
 
     def test_no_escape(self, client):
-        start_boss(client, "Shard Guardian", 1, classic=False)
+        start_boss(client, "Shard Guardian", 1)
         before = _path(client).read_bytes()
         answer = client.post("/api/battle/flee")
         refused(client, answer, 409, "cannot_flee", before)
         assert answer.json()["message"] == "There is no escape from this fight!"
 
-        stored = load(client)
-        answer = client.post("/battle/flee", follow_redirects=False)
-        assert answer.status_code == 303 and answer.headers["location"] == "/battle"
-        after = load(client)
-        assert after["character"] == stored["character"]
-        assert after["battle"]["turn_seq"] == stored["battle"]["turn_seq"]
-        assert after["battle"]["battle_log"] == stored["battle"]["battle_log"]
+        session = GameSession.from_dict(load(client))
+        kept = session.to_dict()
+        with pytest.raises(fight.Rejected) as rejection:
+            fight.flee(session)
+        assert rejection.value.code == "cannot_flee"
+        after = session.to_dict()
+        assert after["character"] == kept["character"]
+        assert after["battle"]["turn_seq"] == kept["battle"]["turn_seq"]
+        assert after["battle"]["battle_log"] == kept["battle"]["battle_log"]
 
 
 class TestAmbush:
-    def test_it_is_fought_on_the_classic_pages(self, client):
+    def test_it_is_fought_on_the_road(self, client):
         fallen, where = start_state("Lady Vex")
         place(client, where, defeated_bosses=fallen, return_to_3d=True, battle_place="boss",
               char_level=BOSSES["Lady Vex"]["level"], char_max_hit_points=9999, char_current_hit_points=9999)
         random.seed(3)
-        answer = client.post("/game/travel", data={"location_name": "Emberforge Mountains"}, follow_redirects=False)
-        assert answer.status_code == 303 and answer.headers["location"] == "/battle"
-        stored = load(client)
-        assert stored["battle"]["is_active"] and stored["battle"]["monster"]["boss_id"] == "Lady Vex"
-        assert stored["return_to_3d"] is False and stored["battle_place"] == "monster"
+        answer = client.post("/api/travel", json={"location": "Emberforge Mountains"})
+        assert answer.status_code == 200 and set(answer.json()) == {"travel", "state", "battle", "ambush"}
+        boss = BOSSES["Lady Vex"]
+        assert answer.json()["ambush"] == {"id": "Lady Vex", "name": boss["name"], "title": boss.get("title", ""),
+                                           "intro": boss.get("intro")}
+        assert answer.json()["state"]["pending"] == {"kind": "battle"}
+        assert answer.json()["state"]["location"]["name"] == "Emberforge Mountains"
+        kept = load(client)
+        assert kept["battle"]["is_active"] and kept["battle"]["monster"]["boss_id"] == "Lady Vex"
+        assert "return_to_3d" not in kept and kept["battle_place"] == "road"
         monster = client.get("/api/battle").json()["battle"]["monster"]
-        assert monster["boss_id"] == "Lady Vex" and monster["place"] == "monster"
+        assert monster["boss_id"] == "Lady Vex" and monster["place"] == "road"
+        assert answer.json()["battle"]["monster"] == monster
 
     def test_an_unknown_place_counts_as_the_monster_slot(self, client):
         where = "Whispering Woods/entrance"

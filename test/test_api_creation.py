@@ -1,5 +1,5 @@
 """Character creation in the 3D client: /api/creation, /api/creation/preview, /api/new-game.
-Both interfaces must make the same character and refuse the same input."""
+The route must make the character of web/creation.py and refuse what it refuses."""
 
 import json
 import sys
@@ -13,8 +13,9 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 import web.game_session as game_session
-from web import creation
+from web import creation, fight, inventory, save_manager, sheet, world
 from web.app import app
+from web.game_session import GameSession
 
 RACES = game_session.get_races()
 CLASSES = game_session.get_classes()
@@ -29,8 +30,11 @@ VALID = {"race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "
 
 @pytest.fixture
 def sessions(tmp_path, monkeypatch):
-    monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
-    return tmp_path
+    folder = tmp_path / "sessions"
+    folder.mkdir()
+    monkeypatch.setattr(game_session, "SESSIONS_DIR", folder)
+    monkeypatch.setattr(save_manager, "SAVES_DIR", tmp_path / "saves")
+    return folder
 
 
 def only_file(folder):
@@ -39,18 +43,18 @@ def only_file(folder):
     return files[0]
 
 
-def classic(sessions, body):
-    """The session file and the sheet the classic routes make for `body`."""
-    with TestClient(app) as c:
-        before = set(sessions.glob("*.json"))
-        c.post("/character/race", data={"race": body["race"]})
-        c.post("/character/class", data={"class_name": body["class_name"]})
-        c.post("/character/create", data={
-            "name": body["name"], "weapon": body["weapon"], "armor": body.get("armor") or "",
-            "portrait": body["portrait"], "skills": body["skills"]}, follow_redirects=False)
-        files = set(sessions.glob("*.json")) - before
-        data = json.loads(files.pop().read_text()) if files else None
-        return data, c.get("/api/character").json(), c.get("/api/state").json()
+def through_function(body):
+    """The session, the sheet and the state `creation.create` makes for `body`, and its refusal code."""
+    session = GameSession()
+    code = None
+    try:
+        creation.create(session, body["race"], body["class_name"], body["name"], body["weapon"], body.get("armor"),
+                        body.get("portrait", creation.DEFAULT_PORTRAIT), body.get("skills", []))
+    except fight.Rejected as rejection:
+        code = rejection.code
+    views = {"inventory": inventory.inventory_view(session), "sheet": sheet.sheet_view(session),
+             "state": world.world_state(session), "message": None} if session.character else None
+    return session.to_dict(), views, world.world_state(session), code
 
 
 def through_api(sessions, body):
@@ -110,7 +114,7 @@ def test_creation_data(sessions):
         "act": {"number": 1, "title": act["title"], "description": act["description"], "main_quest": act["mainQuest"]}}
 
 
-def test_same_character_through_both_interfaces(sessions):
+def test_the_route_makes_the_character_of_the_shared_function(sessions):
     with TestClient(app) as c:
         view = c.get("/api/creation").json()
     count = 0
@@ -121,8 +125,8 @@ def test_same_character_through_both_interfaces(sessions):
             count += 1
             answer, made, sheet, state = through_api(sessions, body)
             assert answer.status_code == 200, (body, answer.text)
-            old, old_sheet, old_state = classic(sessions, body)
-            assert without_id(made) == without_id(old), body
+            old, old_sheet, old_state, code = through_function(body)
+            assert code is None and without_id(made) == without_id(old), body
             assert sheet == old_sheet
             assert answer.json()["state"] == state == old_state
             assert answer.json()["opening"] == creation.opening()
@@ -184,14 +188,15 @@ REFUSED = [
 
 
 @pytest.mark.parametrize("change,code", REFUSED)
-def test_invalid_input_is_refused_in_both(sessions, change, code):
+def test_invalid_input_is_refused(sessions, change, code):
     body = {**VALID, **change}
     answer, made, _, state = through_api(sessions, body)
     assert (answer.status_code, answer.json()["error"]) == (400, code)
-    assert answer.json()["message"]
+    assert answer.json()["message"] == creation.MESSAGES[code]
     assert made is None and state["has_character"] is False
-    _, _, old_state = classic(sessions, body)
-    assert old_state["has_character"] is False
+    old, _, old_state, old_code = through_function(body)
+    assert old_code == code and old_state["has_character"] is False
+    assert without_id(old) == without_id(GameSession().to_dict())
 
 
 @pytest.mark.parametrize("raw", [
@@ -213,8 +218,8 @@ def test_accepted_edges(sessions):
         body = {**VALID, **change}
         answer, made, _, _ = through_api(sessions, body)
         assert answer.status_code == 200
-        old, _, _ = classic(sessions, body)
-        assert without_id(made) == without_id(old)
+        old, _, _, code = through_function(body)
+        assert code is None and without_id(made) == without_id(old)
     minimal = {k: VALID[k] for k in ("race", "class_name", "name", "weapon")}
     answer, made, _, _ = through_api(sessions, minimal)
     assert answer.status_code == 200
@@ -251,15 +256,18 @@ def test_a_refusal_changes_nothing_and_new_game_starts_clean(sessions):
         assert state["location"]["name"] == "Rivermeet Town"
 
 
-def test_classic_pages_still_answer(sessions):
+def test_a_class_starts_with_what_it_may_carry(sessions):
     with TestClient(app) as c:
-        assert c.get("/character/new").status_code == 200
-        c.post("/character/race", data={"race": "Elf"})
-        c.post("/character/class", data={"class_name": "Wizard"})
-        page = c.get("/character/details")
-        assert page.status_code == 200 and "Quarterstaff" in page.text and "Longsword" not in page.text
-        refused = c.post("/character/create", data={"name": "W", "weapon": "Longsword"}, follow_redirects=False)
-        assert (refused.status_code, refused.headers["location"]) == (303, "/character/details")
-        done = c.post("/character/create", data={"name": "W", "weapon": "Quarterstaff"}, follow_redirects=False)
-        assert (done.status_code, done.headers["location"]) == (303, "/character/summary")
-        assert c.get("/character/summary").status_code == 200
+        wizard = next(cls for cls in c.get("/api/creation").json()["classes"] if cls["name"] == "Wizard")
+        offered = [w["name"] for w in wizard["weapons"]]
+        assert offered == creation.allowed_weapons("Wizard")
+        assert "Quarterstaff" in offered and "Longsword" not in offered
+        body = {"race": "Elf", "class_name": "Wizard", "name": "W"}
+        refused = c.post("/api/new-game", json={**body, "weapon": "Longsword"})
+        assert (refused.status_code, refused.json()["error"]) == (400, "bad_weapon")
+        assert not list(sessions.glob("*.json")) and c.get("/api/state").json()["has_character"] is False
+        done = c.post("/api/new-game", json={**body, "weapon": "Quarterstaff"})
+        assert done.status_code == 200 and done.json()["state"]["has_character"] is True
+        made = c.get("/api/character").json()
+        assert (made["sheet"]["class_name"], made["sheet"]["race"]) == ("Wizard", "Elf")
+        assert made["inventory"]["weapon"]["name"] == "Quarterstaff" and made["inventory"]["armor"] is None

@@ -23,6 +23,7 @@ export const FRAME_BUDGET_MS = 16.7;
 export const BASELINE_FACTOR = 1.2;
 export const BASELINE_FILE = join(dirname(fileURLToPath(import.meta.url)), 'frame_baseline.json');
 const FOE = { id: 'frames-goblin', race: 'Goblin', class_name: 'Rogue', level: 1, name: 'Grak', weapon: 'Club' };
+const campaign = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'json', 'campaign.json'), 'utf8'));
 
 /** The headless Chromium of ~/.cache/ms-playwright with software WebGL, as the smoke test starts it. */
 export async function launchBrowser() {
@@ -54,11 +55,54 @@ export function percentile(values, share) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(share * sorted.length) - 1))];
 }
 
-const formPost = (page, path, fields) => page.evaluate(async ([p, f]) => {
-  const r = await fetch(p, { method: 'POST', body: new URLSearchParams(f) });
-  await r.text();
+/** A POST with a JSON body from the page, so it carries the page's session cookie. Answers the status. */
+const jsonPost = (page, path, body) => page.evaluate(async ([p, b]) => {
+  const r = await fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+  await r.text(); // read to the end, or the next navigation aborts the request
   return r.status;
-}, [path, fields]);
+}, [path, body]);
+
+/** The areas to step through from one area of a location to another, along the connections. */
+export function areaPath(locationName, fromId, toId) {
+  const areas = campaign.acts.flatMap((act) => act.locations).find((loc) => loc.name === locationName).areas;
+  const from = new Map([[fromId, null]]);
+  const queue = [fromId];
+  while (queue.length && !from.has(toId)) {
+    const at = queue.shift();
+    for (const next of areas.find((a) => a.id === at).connections) {
+      if (from.has(next)) continue;
+      from.set(next, at);
+      queue.push(next);
+    }
+  }
+  const steps = [];
+  for (let at = toId; from.get(at) != null; at = from.get(at)) steps.unshift(at);
+  return steps;
+}
+
+/** Walks the character to an area of the location it is in, with POST /api/move. */
+export async function walkToArea(page, areaId) {
+  const now = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
+  for (const step of areaPath(now.location.name, now.area.id, areaId)) {
+    const status = await jsonPost(page, '/api/move', { area_id: step });
+    if (status !== 200) throw new Error(`POST /api/move to ${step} answered ${status}`);
+  }
+}
+
+/**
+ * Brings the character to the starting area of a location: the journey of POST /api/travel, or, when the
+ * character is in that location already (a journey the server refuses), the walk back to where one arrives.
+ */
+export async function journey(page, locationName) {
+  const now = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
+  if (now.location.name === locationName) {
+    const location = campaign.acts.flatMap((act) => act.locations).find((loc) => loc.name === locationName);
+    await walkToArea(page, location.starting_area ?? location.areas[0].id);
+    return;
+  }
+  const status = await jsonPost(page, '/api/travel', { location: locationName });
+  if (status !== 200) throw new Error(`POST /api/travel to ${locationName} answered ${status}`);
+}
 
 const walking = () => window.__aiv.screen === 'world' && window.__aiv.loading === false && window.__aiv.layout !== null && window.__aiv.player !== null;
 
@@ -70,7 +114,7 @@ const walking = () => window.__aiv.screen === 'world' && window.__aiv.loading ==
  */
 export async function referenceScene(page, url, scene, plant = null) {
   if (scene === 'fight' && !plant) return null;
-  if ((await formPost(page, '/game/travel', [['location_name', SCENES[scene]]])) >= 400) throw new Error(`frames: no way to ${SCENES[scene]}`);
+  await journey(page, SCENES[scene]);
   if (plant) plant(scene === 'fight' ? FOE : null);
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
   await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.frames > 5, null, { timeout: 30000 });
@@ -147,9 +191,8 @@ async function main() {
     if (!browser) throw new Error('the server did not answer on /health within 60 s');
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 720 } })).newPage();
     await page.goto(url, { waitUntil: 'load', timeout: 30000 });
-    await formPost(page, '/character/race', [['race', 'Human']]);
-    await formPost(page, '/character/class', [['class_name', 'Fighter']]);
-    await formPost(page, '/character/create', [['name', 'Frames'], ['weapon', 'Longsword'], ['armor', 'Chain Mail'], ['skills', 'Athletics'], ['skills', 'Perception']]);
+    const made = await jsonPost(page, '/api/new-game', { race: 'Human', class_name: 'Fighter', name: 'Frames', weapon: 'Longsword', armor: 'Chain Mail', skills: ['Athletics', 'Perception'] });
+    if (made !== 200) throw new Error(`frames: POST /api/new-game answered ${made}`);
     const edit = (change) => {
       const folder = join(dataDir, 'sessions');
       const file = join(folder, readdirSync(folder).find((f) => f.endsWith('.json')));

@@ -1,5 +1,5 @@
-"""Tests for the UI-facing features: area map, inventory use/stacking/comparison,
-ability summaries, XP display and the character creation previews."""
+"""Tests for what the panels of the client show: the walk through a location, inventory
+use/stacking/comparison, ability summaries, the battle view and the character creation previews."""
 
 import sys
 from pathlib import Path
@@ -12,96 +12,79 @@ pytest.importorskip("httpx")
 
 import web.game_session as game_session
 from engine.abilities import summarize_ability
-from web.routes.game import build_area_map
-from test_web_flow import client, load, patch, goto  # noqa: F401  (client is a fixture)
+from test_web_flow import client, load, patch, goto, refused, start_fight  # noqa: F401  (client is a fixture)
 
 CAMPAIGN = game_session.get_campaign()
 ABILITIES = game_session.get_abilities()
 POTION = {"name": "Healing Potion", "description": "", "type": "potion", "healing_amount": 20}
 
 
-def _all_locations():
-    return [loc for act in CAMPAIGN["acts"] for loc in act["locations"]]
-
-
 class TestAreaMap:
-    @pytest.mark.parametrize("location", _all_locations(), ids=lambda loc: loc["name"])
-    def test_every_area_is_placed_inside_the_map(self, location):
-        area_map = build_area_map(location, location["areas"][0], [])
-        assert {n["id"] for n in area_map["nodes"]} == {a["id"] for a in location["areas"]}
-        for node in area_map["nodes"]:
-            assert 0 < node["x"] < 100 and 0 < node["y"] < 100
-        positions = [(n["x"], n["y"]) for n in area_map["nodes"]]
-        assert len(set(positions)) == len(positions)
-
-    def test_entry_is_on_top_and_neighbours_are_reachable(self):
-        town = CAMPAIGN["acts"][0]["locations"][0]
-        area_map = build_area_map(town, town["areas"][0], [])
-        nodes = {n["id"]: n for n in area_map["nodes"]}
-        assert nodes["town_square"]["current"]
-        assert nodes["town_square"]["y"] == min(n["y"] for n in nodes.values())
-        assert {i for i, n in nodes.items() if n["reachable"]} == set(town["areas"][0]["connections"])
-        assert nodes["market"]["shop"] and nodes["tavern"]["rest"]
-        assert nodes["town_square"]["danger"] == "safe"
-
-    def test_each_connection_is_drawn_once(self):
-        town = CAMPAIGN["acts"][0]["locations"][0]
-        edges = build_area_map(town, town["areas"][0], [])["edges"]
-        pairs = [frozenset((e["a"], e["b"])) for e in edges]
-        assert len(pairs) == len(set(pairs)) == 6
-
-    def test_boss_marker_turns_into_cleared(self):
-        woods = CAMPAIGN["acts"][0]["locations"][1]
-        grove = lambda defeated: next(  # noqa: E731
-            n for n in build_area_map(woods, woods["areas"][0], defeated)["nodes"] if n["id"] == "grove")
-        assert grove([])["boss"] and not grove([])["boss_defeated"]
-        assert grove(["Shard Guardian"])["boss_defeated"] and not grove(["Shard Guardian"])["boss"]
-
     def test_location_page_moves_through_the_map(self, client):
-        page = client.get("/game").text
-        assert "area-map" in page and "You are here" in page
-        assert client.post("/game/move", data={"area_id": "market"}).status_code == 200
+        town = CAMPAIGN["acts"][0]["locations"][0]
+        state = client.get("/api/state").json()
+        assert state["area"]["id"] == "town_square" and state["area"]["danger"] == "safe"
+        # Only areas one step away can be walked to
+        assert [e["id"] for e in state["exits"]] == town["areas"][0]["connections"]
+        refused(client.post("/api/move", json={"area_id": "inn_rooms"}), 400, "not_connected")
+        assert load(client)["area_id"] == "town_square"
+
+        response = client.post("/api/move", json={"area_id": "market"})
+        assert response.status_code == 200
         assert load(client)["area_id"] == "market"
+        market = response.json()["area"]
+        assert market["id"] == "market" and market["has_shop"] and not market["can_rest"]
+        assert "town_square" in [e["id"] for e in response.json()["exits"]]
+
+        client.post("/api/move", json={"area_id": "town_square"})
+        tavern = client.post("/api/move", json={"area_id": "tavern"}).json()["area"]
+        assert tavern["can_rest"] and not tavern["has_shop"]
 
 
 class TestInventory:
     def test_drinking_a_potion_heals_and_consumes_it(self, client):
         patch(client, char_inventory=[POTION, POTION], char_current_hit_points=1)
-        page = client.post("/inventory/use", data={"item_index": 0}).text
+        response = client.post("/api/inventory/use", json={"item_index": 0})
+        assert response.status_code == 200
         char = load(client)["character"]
         assert char["current_hit_points"] == min(char["max_hit_points"], 21)
         assert len(char["inventory"]) == 1
-        assert "recover" in page
+        assert "recover" in response.json()["message"]
+        assert response.json()["state"]["character"]["current_hit_points"] == char["current_hit_points"]
 
     def test_potion_is_kept_at_full_health(self, client):
         patch(client, char_inventory=[POTION])
-        page = client.post("/inventory/use", data={"item_index": 0}).text
+        response = client.post("/api/inventory/use", json={"item_index": 0})
+        refused(response, 409, "full_health")
         assert len(load(client)["character"]["inventory"]) == 1
-        assert "already at full health" in page
+        assert "already at full health" in response.json()["message"]
 
     def test_only_potions_can_be_used(self, client):
         patch(client, char_inventory=[{"name": "Dagger", "type": "weapon"}], char_current_hit_points=1)
-        client.post("/inventory/use", data={"item_index": 0})
-        client.post("/inventory/use", data={"item_index": 7})
+        refused(client.post("/api/inventory/use", json={"item_index": 0}), 404, "no_such_item")
+        refused(client.post("/api/inventory/use", json={"item_index": 7}), 404, "no_such_item")
         char = load(client)["character"]
         assert char["current_hit_points"] == 1 and len(char["inventory"]) == 1
 
     def test_identical_potions_are_stacked(self, client):
         patch(client, char_inventory=[POTION, POTION, POTION])
-        page = client.get("/inventory").text
-        assert page.count('action="/inventory/use"') == 1
-        assert "&times;3" in page
+        items = client.get("/api/character").json()["inventory"]["items"]
+        assert len(items) == 1
+        assert items[0]["name"] == "Healing Potion" and items[0]["count"] == 3
 
     def test_gear_is_compared_with_what_is_equipped(self, client):
         patch(client, char_inventory=[
             {"name": "Greatsword", "type": "weapon"}, {"name": "Dagger", "type": "weapon"},
             {"name": "Leather", "type": "armor"}])
-        page = client.get("/inventory").text
-        assert "+2.5 avg damage vs equipped" in page      # 2d6 against the Longsword's 1d8
-        assert "-2 avg damage vs equipped" in page
-        assert "compare-worse" in page and "AC vs equipped" in page
+        view = client.get("/api/character").json()["inventory"]
+        compare = {item["name"]: item["compare"] for item in view["items"]}
+        # 2d6 against the Longsword's 1d8
+        assert compare["Greatsword"] == {"cls": "better", "text": "+2.5 avg damage"}
+        assert compare["Dagger"] == {"cls": "worse", "text": "-2 avg damage"}
+        assert compare["Leather"]["cls"] == "worse" and compare["Leather"]["text"].endswith(" AC")
         # Previewing armor must not change what is worn
         assert load(client)["character"]["armor"] == "Chain Mail"
+        assert view["armor"]["name"] == "Chain Mail"
 
 
 class TestAbilitySummary:
@@ -122,45 +105,56 @@ class TestAbilitySummary:
 
 class TestBattleScreen:
     def test_abilities_and_stacked_items_have_hotkeys(self, client):
-        patch(client, char_inventory=[POTION, POTION])
+        patch(client, char_inventory=[POTION, POTION],
+              char_current_hit_points=10_000, char_max_hit_points=10_000)
         goto(client, 1, "Whispering Woods", "clearing")
-        page = client.get("/battle/start").text
-        assert 'data-hotkey="a"' in page and 'data-hotkey="1"' in page
-        assert "1d8 + mod slashing" in page
-        assert page.count('action="/battle/item"') == 1 and 'data-hotkey="q"' in page
-        assert 'data-combatant="monster"' in page
+        start_fight(client)
+        view = client.get("/api/battle").json()["battle"]
+        strike = view["abilities"][0]
+        assert strike["id"] == "power_strike" and strike["hotkey"] == "1"
+        assert strike["summary"] == ["1d8 + mod slashing"]
+        assert len(view["items"]) == 1
+        assert view["items"][0]["count"] == 2 and view["items"][0]["hotkey"] == "q"
+        assert view["monster"]["race"] in ("Goblin", "Orc") and view["monster"]["hp"] > 0
 
     def test_victory_rewards_survive_a_refresh(self, client):
         goto(client, 1, "Whispering Woods", "clearing")
         patch(client, char_current_hit_points=10_000, char_max_hit_points=10_000)
-        client.get("/battle/start")
+        start_fight(client)
         data = load(client)
         data["battle"]["monster"]["hp"] = 1
         patch(client, battle=data["battle"])
         for _ in range(60):
-            response = client.post("/battle/attack")
-            if response.url.path != "/battle/":
+            answer = client.post("/api/battle/attack", json={}).json()
+            if answer["battle"]["phase"] != "fight":
                 break
-        assert "Rewards" in response.text
-        assert "Rewards" in client.get("/battle/victory").text
-        assert "xp-bar" in response.text
+        assert answer["battle"]["phase"] == "victory"
+        assert answer["battle"]["rewards"]["xp"] > 0
+        again = client.get("/api/battle").json()
+        assert again["battle"]["phase"] == "victory"
+        assert again["battle"]["rewards"] == answer["battle"]["rewards"]
+        assert again["state"]["character"]["xp"] == answer["state"]["character"]["xp"] > 0
 
 
 class TestCharacterCreation:
     def test_class_cards_show_playstyle_and_abilities(self, client):
-        client.get("/character/new")
-        page = client.post("/character/race", data={"race": "Human"}).text
+        classes = {entry["name"]: entry for entry in client.get("/api/creation").json()["classes"]}
         for class_name, props in game_session.get_classes().items():
-            assert props["playstyle"] in page
-        assert "Power Strike" in page and "Champion" in page
+            assert classes[class_name]["playstyle"] == props["playstyle"]
+        names = [ability["name"] for ability in classes["Fighter"]["abilities"]]
+        assert "Power Strike" in names and "Champion's Blow" in names
 
     def test_details_preview_shows_final_numbers(self, client):
-        client.get("/character/new")
-        client.post("/character/race", data={"race": "Human"})
-        page = client.post("/character/class", data={"class_name": "Monk"}).text
-        assert "char-preview" in page and "power points" in page
+        response = client.get("/api/creation/preview", params={"race": "Human", "class_name": "Monk"})
+        assert response.status_code == 200
+        preview = response.json()
+        assert preview["power_points"] > 0 and preview["hit_points"] > 0
         # Monk's Unarmored Defense is part of the previewed AC
-        assert 'id="preview-ac"' in page
-        client.post("/character/create", data={"name": "Preview", "weapon": "Quarterstaff", "armor": ""})
-        created_ac = load(client)["character"]["armor_class"]
-        assert f'data-default="{created_ac}"' in page
+        assert preview["unarmored_ac"] == 10 + 2 + 1
+        created = client.post("/api/new-game", json={
+            "race": "Human", "class_name": "Monk", "name": "Preview", "weapon": "Quarterstaff", "armor": None})
+        assert created.status_code == 200
+        character = load(client)["character"]
+        assert preview["unarmored_ac"] == character["armor_class"]
+        assert preview["hit_points"] == character["max_hit_points"]
+        assert preview["power_points"] == character["max_power_points"]

@@ -1,5 +1,6 @@
 """The JSON API the 3D client walks with: GET /api/state and POST /api/move."""
 
+import random
 import sys
 import json
 from pathlib import Path
@@ -12,13 +13,13 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 from dice import Dice
+import web.app as web_app
 import web.game_session as game_session
 from web.app import app
-from web.routes import game as game_routes
-from web import world
+from web.game_session import GameSession
+from web import creation, events, world
 
 CAMPAIGN = game_session.get_campaign()
-NAV_LINK = '<a href="/" class="nav-3d">3D world</a>'
 NO_CHARACTER = {"has_character": False, "character": None, "location": None, "area": None,
                 "exits": [], "pending": None, "asi_points": 0, "quests": []}
 ALL_AREAS = [
@@ -37,13 +38,19 @@ def fresh(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(fresh):
-    fresh.post("/character/race", data={"race": "Human"})
-    fresh.post("/character/class", data={"class_name": "Fighter"})
-    response = fresh.post("/character/create", data={
-        "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
+    response = fresh.post("/api/new-game", json={
+        "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+        "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
         "skills": ["Athletics", "Perception"]})
     assert response.status_code == 200
     return fresh
+
+
+def meet_the_boss(client):
+    """The character in the grove of the Whispering Woods, in a fight with its boss."""
+    patch(client, act_num=1, location_name="Whispering Woods", area_id="grove", area_contents={
+        "location": "Whispering Woods", "area_id": "grove", "seq": 1, "monster": None, "event": None, "spent": None})
+    return client.post("/api/engage", json={"id": "Shard Guardian"})
 
 
 def _path(client) -> Path:
@@ -159,17 +166,24 @@ class TestState:
 class TestPending:
     def test_battle(self, client, monkeypatch):
         win_initiative(monkeypatch)
-        patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
-        client.post("/battle/boss", follow_redirects=False)
+        answer = meet_the_boss(client)
+        assert answer.status_code == 200 and set(answer.json()) == {"state", "battle", "event"}
+        assert answer.json()["state"]["pending"] == {"kind": "battle"}
         assert load(client)["battle"]["is_active"] is True
         patch(client, pending_event="abandoned_chest", char_current_hit_points=0)
         body = client.get("/api/state").json()
-        assert body["pending"] == {"kind": "battle", "url": "/battle"}
+        assert body["pending"] == {"kind": "battle"}
         assert body["character"] and body["location"] and body["area"] and body["exits"]
 
     def test_defeat_comes_before_an_event(self, client):
         patch(client, char_current_hit_points=0, pending_event="abandoned_chest")
-        assert client.get("/api/state").json()["pending"] == {"kind": "defeat", "url": "/battle/defeat"}
+        assert client.get("/api/state").json()["pending"] == {"kind": "defeat"}
+
+    def test_an_event_id_that_names_no_event_is_not_pending(self, client):
+        patch(client, pending_event="no_such_event")
+        assert client.get("/api/state").json()["pending"] is None
+        patch(client, pending_event="no_such_event", event_result={"title": "T", "text": "x"})
+        assert client.get("/api/state").json()["pending"] == {"kind": "event"}
 
     @pytest.mark.parametrize("change", [
         {"pending_event": "abandoned_chest"},
@@ -177,7 +191,7 @@ class TestPending:
     ])
     def test_event(self, client, change):
         patch(client, **change)
-        assert client.get("/api/state").json()["pending"] == {"kind": "event", "url": "/game/event"}
+        assert client.get("/api/state").json()["pending"] == {"kind": "event"}
 
 
 class TestMove:
@@ -198,20 +212,33 @@ class TestMove:
         assert {k: v for k, v in after.items() if k not in moving} == {k: v for k, v in before.items() if k not in moving}
         assert after["area_contents"]["area_id"] == target and after["area_contents"]["seq"] == 1
         name = next(a["name"] for a in loc["areas"] if a["id"] == target)
-        assert name in client.get("/game").text
+        assert name == response.json()["area"]["name"]
 
-    def test_the_api_sees_a_classic_move(self, client):
+    def test_the_route_moves_as_the_function_does(self, client):
         stored = load(client)
         _, _, area = find(stored["act_num"], stored["location_name"], stored["area_id"])
         target = area["connections"][-1]
-        response = client.post("/game/move", data={"area_id": target}, follow_redirects=False)
-        assert response.status_code == 303 and response.headers["location"] == "/game"
+        session = GameSession.from_dict(stored)
+        random.seed(7)
+        assert world.move_to_area(session, target) is True
+        random.seed(7)
+        response = client.post("/api/move", json={"area_id": target})
+        assert response.status_code == 200 and response.json()["area"]["id"] == target
+
+        def without_ids(data):
+            data = json.loads(json.dumps(data))
+            if data["area_contents"]["monster"]:
+                data["area_contents"]["monster"].pop("id", None)
+            return data
+        assert without_ids(load(client)) == without_ids(session.to_dict())
         assert client.get("/api/state").json()["area"]["id"] == target
 
-    def test_classic_move_ignores_an_unconnected_area(self, client):
+    def test_the_function_ignores_an_unconnected_area(self, client):
         before = _path(client).read_bytes()
-        response = client.post("/game/move", data={"area_id": "bridge"}, follow_redirects=False)
-        assert response.status_code == 303
+        session = GameSession.from_dict(load(client))
+        assert world.move_to_area(session, "bridge") is False
+        assert session.to_dict() == GameSession.from_dict(json.loads(before)).to_dict()
+        assert client.post("/api/move", json={"area_id": "bridge"}).json()["error"] == "not_connected"
         assert _path(client).read_bytes() == before
 
     def test_no_character(self, fresh):
@@ -260,21 +287,55 @@ class TestMove:
 
     def test_pending_battle(self, client, monkeypatch):
         win_initiative(monkeypatch)
-        patch(client, act_num=1, location_name="Whispering Woods", area_id="grove")
-        client.post("/battle/boss", follow_redirects=False)
+        assert meet_the_boss(client).json()["battle"]["phase"] == "fight"
         before = _path(client).read_bytes()
         response = client.post("/api/move", json={"area_id": "clearing"})
         assert response.status_code == 409 and response.json()["error"] == "pending"
         assert _path(client).read_bytes() == before
 
 
-class TestClassic:
-    @pytest.mark.parametrize("url", ["/game", "/inventory", "/character/summary", "/game/journal", "/saves"])
-    def test_pages_link_to_the_3d_world(self, client, url):
-        assert NAV_LINK in client.get(url).text
+class TestRetired:
+    """The server-rendered interface is gone: its addresses lead to the game and do nothing."""
 
-    def test_old_names_still_importable(self):
-        assert game_routes._danger({"encounters": 3}) == "med"
-        assert game_routes._can_rest({"special": "Inn"}) is True
-        assert game_routes.EVENT_CHANCE == 0.65
-        assert callable(game_routes.location_tier) and callable(game_routes.build_area_map)
+    REQUESTS = [("GET", "/game"), ("POST", "/battle/attack"), ("GET", "/classic"), ("GET", "/saves/load/abc"),
+                ("POST", "/character/create"), ("POST", "/shop/buy"), ("GET", "/inventory"), ("POST", "/game/move")]
+
+    @pytest.mark.parametrize("method,url", REQUESTS)
+    def test_a_classic_address_leads_to_the_game_and_changes_nothing(self, client, monkeypatch, method, url):
+        # In a fight, where POST /battle/attack used to play a turn
+        rolls = iter([20])
+        monkeypatch.setattr(Dice, "roll_d20", lambda: next(rolls, 1))
+        assert meet_the_boss(client).status_code == 200
+        before = _path(client).read_bytes()
+        response = client.request(method, url, data={"area_id": "clearing", "item_index": 0},
+                                  follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
+        assert _path(client).read_bytes() == before
+        assert len(list(client.sessions_dir.glob("*.json"))) == 1
+
+    @pytest.mark.parametrize("method,url", REQUESTS)
+    def test_a_classic_address_starts_no_session(self, fresh, method, url):
+        response = fresh.request(method, url, follow_redirects=False)
+        assert (response.status_code, response.headers["location"]) == (303, "/")
+        assert list(fresh.sessions_dir.glob("*.json")) == []
+
+    def test_an_address_that_only_begins_like_one_is_unknown(self, client):
+        before = _path(client).read_bytes()
+        assert client.get("/gameplay", follow_redirects=False).status_code == 404
+        assert _path(client).read_bytes() == before
+
+    def test_without_a_built_client_the_root_says_so(self, fresh):
+        # web/app.py decides at import time which route answers /.
+        if (web_app.CLIENT_DIST / "index.html").is_file():
+            pytest.skip("client/dist is built: / serves the client")
+        response = fresh.get("/", follow_redirects=False)
+        assert response.status_code == 503
+        assert response.json() == {"error": "no_client", "message": "The client is not built. Run pnpm build."}
+
+    def test_names_that_moved(self):
+        assert world.danger_band({"encounters": 3}) == "med"
+        assert world.can_rest({"special": "Inn"}) is True
+        assert world.has_shop({"special": "Shop"}) is True
+        assert world.EVENT_CHANCE == 0.65
+        assert callable(events.location_tier)

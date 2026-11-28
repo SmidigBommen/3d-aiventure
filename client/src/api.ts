@@ -40,7 +40,7 @@ export interface WorldState {
     is_start: boolean; // travel arrives in this area: it has the signpost
   } | null;
   exits: { id: string; name: string; danger: Danger }[];
-  pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
+  pending: { kind: 'battle' | 'event' | 'defeat' } | null;
   contents?: AreaContents | null; // what the area holds; null until the server has rolled it
   asi_points?: number; // ability score points not yet spent
   quests?: TrackedQuest[]; // the active quests, for the tracker
@@ -89,13 +89,13 @@ export async function postSearch(): Promise<MoveAnswer> {
   return asState(await post<WorldState>('/api/search'));
 }
 
-export type EngageAnswer = { ok: true; url: string; state: WorldState; battle: BattleView | null; event: EventView | null } | Refusal;
+export type EngageAnswer = { ok: true; state: WorldState; battle: BattleView | null; event: EventView | null } | Refusal;
 
 /** Meeting the monster, event or boss with this id. Answers the fight, or the event with its choices. */
 export async function postEngage(id: string): Promise<EngageAnswer> {
-  const answer = await post<{ url: string; state: WorldState; battle?: BattleView | null; event?: EventView | null }>('/api/engage', { id });
+  const answer = await post<{ state: WorldState; battle?: BattleView | null; event?: EventView | null }>('/api/engage', { id });
   if (!answer.ok) return answer;
-  return { ok: true, url: answer.value.url, state: answer.value.state, battle: answer.value.battle ?? null, event: answer.value.event ?? null };
+  return { ok: true, state: answer.value.state, battle: answer.value.battle ?? null, event: answer.value.event ?? null };
 }
 
 // --- events ---

@@ -1,4 +1,4 @@
-"""JSON API of the save slots in the 3D client. The files are those of web/save_manager.py, shared with /saves."""
+"""JSON API of the save slots in the 3D client. The files are those of web/save_manager.py."""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse

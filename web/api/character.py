@@ -1,6 +1,6 @@
 """JSON API of the inventory, the character sheet and rest in the 3D world.
 
-Every action is the function of web/inventory.py, web/sheet.py or web/world.py that the classic route calls.
+Every action is a function of web/inventory.py, web/sheet.py or web/world.py.
 """
 
 from fastapi import APIRouter, Request

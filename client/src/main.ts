@@ -58,7 +58,7 @@ import { bobOffset, gaitStep, shakeOf, startGait, vignette, type Shake } from '.
 import { heldKeys, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 import { startWander, wanderStep, type Wanderer } from './world/wander';
 
-type Screen = 'title' | 'creation' | 'opening' | 'world' | 'pending' | 'battle' | 'event' | 'intro' | 'ending';
+type Screen = 'title' | 'creation' | 'opening' | 'world' | 'battle' | 'event' | 'intro' | 'ending';
 /** The panels that open over the world while `screen` stays 'world'. */
 type OpenPanel = PanelKind | 'shop' | 'travel' | 'journal';
 
@@ -324,9 +324,7 @@ let slotsFrom: 'menu' | 'title' = 'menu';
 let slotsMessage: PanelMessage | null = null;
 let slotsLocked = false; // a save, a load or a delete is on its way to the server
 
-// The title panel is on screen: plainly ('title'), or with the pending link when something is pending that
-// could not be opened here ('pending'). New game and Load game work in both.
-const atTitle = (): boolean => screen === 'title' || screen === 'pending';
+const atTitle = (): boolean => screen === 'title';
 const inWorld = (): boolean => screen === 'world' && layout !== null;
 // A panel is open over the area: the player stands where they stood and nothing walks.
 const inPanel = (): boolean => (screen === 'event' || screen === 'intro') && layout !== null;
@@ -606,19 +604,24 @@ async function enterRoad(next: WorldState): Promise<void> {
   setLoading(false);
 }
 
-/** Shows what the server says: the title panel, the pending link, or (when already walking) the world. */
+/** Shows what the server says: the title panel, or (when already walking) the world. What is pending opens in the world. */
 function apply(next: WorldState | null, keepWalking: boolean): void {
+  if (next?.pending) {
+    // `refresh` opens the fight, the defeat or the event, and never comes back here with it.
+    void refresh();
+    return;
+  }
   state = next;
   if (next && next.has_character && !next.pending && next.location && next.area && keepWalking) {
     void enterArea(next, null);
     return;
   }
   leaveWorld();
-  screen = next?.pending ? 'pending' : 'title';
+  screen = 'title';
   showTitle(next, saveCount);
 }
 
-// Where the player stood when an encounter was started, kept for the way back from the classic pages.
+// Where the player stood when an encounter was started: a reload puts them back there.
 const RETURN_KEY = 'aiv.return';
 interface ReturnPoint {
   location: string;
@@ -708,6 +711,11 @@ async function refresh(): Promise<void> {
         return;
       }
     }
+    // What is pending could not be asked for: there is nothing to show of this game.
+    if (next.pending) {
+      apply(null, false);
+      return;
+    }
     const back = walkable && matches ? saved : null;
     if (walkable && (wasWalking || back)) {
       // Arriving: the server rolls what the area holds when it has not yet.
@@ -737,7 +745,7 @@ async function crossGate(gate: Gate): Promise<void> {
   if (answer.ok && !answer.state.pending && answer.state.area) {
     await enterArea(answer.state, from);
   } else {
-    // Refused: show what the server says is true now, from the default spawn or the pending link.
+    // Refused: show what the server says is true now, from the default spawn or in what is pending.
     await fetchState().then((next) => apply(next, true), () => apply(null, false));
   }
   veil(false);
@@ -746,7 +754,7 @@ async function crossGate(gate: Gate): Promise<void> {
 
 // --- what the area holds ------------------------------------------------------------------------
 
-/** Meets the monster, event or boss with this id: the encounter goes on where the server says. */
+/** Meets the monster, event or boss with this id: the fight or the event opens here. */
 async function engage(id: string): Promise<void> {
   if (busy || !state?.location || !state.area) return;
   busy = true;
@@ -773,10 +781,6 @@ async function engage(id: string): Promise<void> {
       turn(t.dYaw, t.dPitch);
     }
     openEvent(answer.event, null, answer.state);
-    return;
-  }
-  if (answer.ok) {
-    window.location.assign(answer.url);
     return;
   }
   forgetReturn();
@@ -1059,10 +1063,23 @@ async function riseAgain(): Promise<void> {
   await enterArea(answer.state, null);
 }
 
-bindBattlePanel({ act: (action) => void act(action), proceed: () => void proceed(), revive: () => void riseAgain() });
-// Start Over is a link to the classic creation page: it sounds as it is followed.
-document.getElementById('battle-result')?.addEventListener('click', (event) => {
-  if ((event.target as HTMLElement).closest('a')) actionSound('start_over');
+/**
+ * Start Over on the defeat panel: out of the world and into character creation, as New game on the title
+ * screen. Nothing is sent: until the new game is posted the fallen character is what Continue leads to.
+ */
+function startOver(): void {
+  if (!fight || fight.result !== 'defeat' || busy) return;
+  leaveWorld();
+  screen = 'title';
+  showTitle(state, saveCount);
+  void openCreation();
+}
+
+bindBattlePanel({
+  act: (action) => void act(action),
+  proceed: () => void proceed(),
+  revive: () => void riseAgain(),
+  restart: () => startOver(),
 });
 
 function battleKey(event: KeyboardEvent): void {
@@ -1155,7 +1172,7 @@ async function proceedEvent(): Promise<void> {
   }
   let next = answer.state;
   if (!next.pending && !contentsOf(next)) {
-    // The event was met on the classic pages: what the area holds is rolled on arriving here.
+    // Nothing is stored for this area yet: what it holds is rolled on arriving here.
     const arrived = await postEnter();
     if (mine !== entry) return;
     if (arrived.ok) next = arrived.state;
@@ -1751,8 +1768,7 @@ function creationBack(): void {
   actionSound('creation_step');
   if (before === null) {
     closeCreation();
-    // Back on the title panel as it was: with the pending link when something of the earlier game is pending.
-    screen = state?.pending ? 'pending' : 'title';
+    screen = 'title';
     showTitle(state, saveCount);
     return;
   }
@@ -1805,10 +1821,13 @@ bindOpeningPanel({
   },
 });
 
-/** Continue on the title screen and after the opening: into the area the character stands in. */
+/**
+ * Continue on the title screen and after the opening: into the area the character stands in, or into
+ * the fight, the defeat or the event that is pending there.
+ */
 async function enterGame(): Promise<void> {
   const from = screen;
-  if ((from !== 'title' && from !== 'opening') || !state || !state.has_character || state.pending || busy || slots) return;
+  if ((from !== 'title' && from !== 'opening') || !state || !state.has_character || busy || slots) return;
   actionSound(from === 'opening' ? 'opening_continue' : 'title_button');
   busy = true;
   // Arriving: the server rolls what the area holds when it has not yet.
@@ -2204,6 +2223,12 @@ document.getElementById('menu-quit')?.addEventListener('click', () => quitToTitl
 document.getElementById('btn-continue')?.addEventListener('click', () => void enterGame());
 document.getElementById('btn-new-game')?.addEventListener('click', () => void openCreation());
 document.getElementById('btn-load-game')?.addEventListener('click', () => void openSaves('load'));
+// Try again, when the server did not answer: what a page load asks.
+document.getElementById('btn-retry')?.addEventListener('click', () => {
+  if (!titleShown()) return;
+  actionSound('title_button');
+  void refresh();
+});
 
 // --- frame loop --------------------------------------------------------------------------------
 
@@ -2340,8 +2365,8 @@ renderer.setAnimationLoop(() => {
 });
 
 // The state is asked for on load, and again when the page comes back from the browser's
-// back/forward cache (after a visit to a classic page). On the way back from an encounter the
-// title panel stays away while the answer is on its way.
+// back/forward cache. With a place to go back to in an area, the title panel stays away while the
+// answer is on its way.
 if (savedReturn()) hideTitle();
 void refresh();
 window.addEventListener('pageshow', (event) => {

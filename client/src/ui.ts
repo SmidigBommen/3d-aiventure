@@ -10,38 +10,22 @@ const show = (node: HTMLElement, visible: boolean): void => {
   node.hidden = !visible;
 };
 
-const PENDING_TEXT: Record<string, [string, string]> = {
-  battle: ['A battle is under way.', 'Return to the battle'],
-  event: ['Something needs your attention.', 'Return to the event'],
-  defeat: ['You have fallen.', 'Continue'],
-};
 const DANGER_TEXT: Record<string, string> = { safe: 'Safe', low: 'Low', med: 'Medium', high: 'High' };
 const DESCRIPTION_SECONDS = 6;
 
 /** The title panel for a state, or for no answer from the server (`null`). */
 export function showTitle(state: WorldState | null, saveCount = 0): void {
   const offered = state === null ? [] : titleButtons(state.has_character, saveCount);
-  const pending = state?.pending ?? null;
   const message = el('title-message');
-  const link = el<HTMLAnchorElement>('pending-link');
   show(el('title-screen'), true);
   show(el('hud'), false);
   show(el('menu'), false);
   show(el('btn-new-game'), offered.includes('new'));
-  // With something pending the way on is the pending link.
-  show(el('btn-continue'), offered.includes('continue') && !pending);
+  show(el('btn-continue'), offered.includes('continue'));
   show(el('btn-load-game'), offered.includes('load'));
-  show(el('classic-link'), state === null);
-  show(link, pending !== null);
-  show(message, state === null || pending !== null);
-  if (state === null) {
-    message.textContent = 'The server did not answer.';
-  } else if (pending) {
-    const [line, label] = PENDING_TEXT[pending.kind] ?? PENDING_TEXT.event;
-    message.textContent = line;
-    link.textContent = label;
-    link.href = pending.url;
-  }
+  show(el('btn-retry'), state === null);
+  show(message, state === null);
+  if (state === null) message.textContent = 'The server did not answer.';
 }
 
 let descriptionTimer: number | undefined;

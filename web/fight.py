@@ -1,8 +1,7 @@
 """A fight, as functions of a GameSession: every battle action, the round loop, the end of a fight
 and the view of it for the JSON API.
 
-No Request, no saving, no redirects: the classic routes (web/routes/battle.py) and the API routes
-(web/api/battle.py) both call these, so both interfaces play the same fight with the same dice.
+No Request, no saving: the API routes (web/api/) call these.
 The rules themselves are in engine/.
 """
 
@@ -225,11 +224,16 @@ def begin_random_battle(session, place: str = "monster") -> bool:
 
 
 def begin_boss_battle(session, boss_id: str, place: str = "boss") -> bool:
-    """Start a fight against a boss from bosses.json. The ambush on the road passes place "monster"."""
+    """Start a fight against a boss from bosses.json. The ambush on the road passes place "road"."""
     boss = get_bosses()[boss_id]
     state = CombatantState.from_boss(boss_id, boss)
     return begin_battle(session, state, intro_lines=[boss["intro"]] if boss.get("intro") else None,
                         place=place)
+
+
+def opened(session, player_stands: bool) -> str:
+    """The phase of a fight that has just begun: the opening blow may have ended it in a defeat."""
+    return "fight" if player_stands else end_battle(session, False)
 
 
 def enrage_text(monster) -> str:

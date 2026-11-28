@@ -1,6 +1,6 @@
 """JSON API of travel, the journal and the ending in the 3D world.
 
-Every route is a function of web/travel.py that the classic route calls too.
+Every route is a function of web/travel.py.
 """
 
 from fastapi import APIRouter, Request
@@ -54,7 +54,7 @@ async def travel_to(request: Request):
     if session.current_location and session.current_location["name"] == name:
         return _refuse(409, "already_here", "You are already there.")
 
-    result = travel.travel(session, name, in_3d=True)
+    result = travel.travel(session, name)
     save_session(request, session)
     ambush = None
     if result != "arrived":

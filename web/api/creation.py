@@ -1,6 +1,6 @@
 """JSON API of character creation in the 3D client: the data, the preview and the new game.
 
-The rules are the functions of web/creation.py that the classic routes call.
+The rules are the functions of web/creation.py.
 """
 
 from fastapi import APIRouter, Request

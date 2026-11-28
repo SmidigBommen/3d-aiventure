@@ -1,4 +1,4 @@
-"""Balance simulator — plays fights through the real routes with a sensible policy.
+"""Balance simulator — plays fights through the JSON API with a sensible policy.
 
 Usage (from the repo root, needs httpx installed):
 
@@ -7,8 +7,11 @@ Usage (from the repo root, needs httpx installed):
     python tools/balance_sim.py monsters               # a regular fight in each location
     python tools/balance_sim.py bosses --classes Monk,Druid --trials 40
     python tools/balance_sim.py bosses --classes all   # class comparison
+    python tools/balance_sim.py bosses --seed 100      # other fights; the same seed prints the same table
 
-Each cell shows win rate and average fight length in rounds. The simulated
+Each cell shows win rate, average fight length in player actions and average
+hit points left. Trial t of every cell is played with seed --seed + t (default
+0), so a table can be compared before and after a change. The simulated
 player starts at full HP/PP with its ability score improvements spent on the
 class's primary ability, heals below 45% HP (potion first, then a heal
 ability), opens with a whole-combat self-buff if it has one, and otherwise uses
@@ -22,6 +25,7 @@ score a little lower here than they play.
 
 import argparse
 import json
+import random
 import statistics
 import sys
 import tempfile
@@ -37,7 +41,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import web.game_session as gs  # noqa: E402
 from engine.leveling import ABILITY_SCORE_CAP, asi_points_earned  # noqa: E402
 from web.app import app  # noqa: E402
-from web.routes.battle import begin_boss_battle  # noqa: E402
+from web import fight  # noqa: E402
 
 BOSSES = gs.get_bosses()
 ABILITIES = gs.get_abilities()
@@ -105,92 +109,106 @@ def _expected_damage(ability, level):
     return (dice * (dmg["dice_size"] + 1) / 2 + bonus) * hit + dot
 
 
-def run_fight(class_name, target, level, potions, sessions_dir):
+def _prepare(data, class_name, target, level, potions):
+    """Edit a fresh session dict into the simulated player standing where the fight is."""
+    char = data["character"]
+    hit_die = CLASSES[class_name]["hit_die"]
+    char["level"] = level
+    # Spend ability score improvements: primary ability first, then Constitution
+    primary = CLASSES[class_name]["primary_ability"].lower()
+    scores = {a: char[f"{a}_score"] for a in (primary, "constitution")}
+    increases = {}
+    for _ in range(asi_points_earned(level)):
+        ability = primary if scores[primary] < ABILITY_SCORE_CAP else "constitution"
+        scores[ability] += 1
+        increases[ability] = increases.get(ability, 0) + 1
+    char["ability_increases"] = increases
+    con = (scores["constitution"] - 10) // 2
+    char["max_hit_points"] = char["current_hit_points"] = (
+        hit_die + con + (level - 1) * max(1, hit_die // 2 + 1 + con))
+    char.pop("power_points", None)   # restored at max for the level
+    name, healing = _potion_for(level)
+    char["inventory"] = [{"name": name, "description": "", "type": "potion",
+                          "healing_amount": healing}] * potions
+
+    boss_areas = _boss_areas()
+    if isinstance(target, tuple):
+        data["act_num"], data["location_name"], data["area_id"] = target
+    elif target in boss_areas:
+        data["act_num"], data["location_name"], data["area_id"] = boss_areas[target]
+        data["defeated_bosses"] = BOSSES[target].get("requires", [])
+    # an ambush boss has no area: it is fought wherever the character stands
+
+
+def _next_action(battle, known, level, actions_sent):
+    """The simulated player's move as (route, body), read from the battle view."""
+    player = battle["player"]
+    hp_fraction = player["hp"] / player["max_hp"]
+    pp = player["pp"]
+
+    heals = [aid for aid, a in known if a.get("heal") and a["cost"] <= pp]
+    if hp_fraction < 0.45 and battle["items"]:
+        return "item", {"item_index": 0}
+    if hp_fraction < 0.45 and heals:
+        return "ability", {"ability_id": heals[-1]}
+
+    active_sources = {e["source"] for e in player["effects"]}
+    buffs = [aid for aid, a in known
+             if a["target"] == "self" and not a.get("heal") and a["cost"] <= pp
+             and any(e["duration"] == 0 for e in a.get("effects", []))
+             and a["name"] not in active_sources]
+    if buffs and actions_sent < 3:
+        return "ability", {"ability_id": buffs[0]}
+
+    attacks = [(_expected_damage(a, level), aid) for aid, a in known
+               if a["cost"] <= pp and _expected_damage(a, level) > 0]
+    if attacks:
+        return "ability", {"ability_id": max(attacks)[1]}
+    return "attack", {}
+
+
+def run_fight(class_name, target, level, potions, sessions_dir, seed=None):
     """Play one fight. `target` is a boss id or an (act, location, area_id) tuple.
 
-    Returns (won, rounds, remaining_hp_fraction).
+    With a seed the fight is the same every time. Returns (won, rounds, remaining_hp_fraction),
+    `rounds` being the number of actions the player took.
     """
     gs.SESSIONS_DIR = Path(sessions_dir)
     for stale in gs.SESSIONS_DIR.glob("*.json"):
         stale.unlink()
 
     with TestClient(app) as client:
-        client.post("/character/race", data={"race": "Human"})
-        client.post("/character/class", data={"class_name": class_name})
         weapon, armor = KIT[class_name]
-        client.post("/character/create", data={"name": "Sim", "weapon": weapon, "armor": armor})
+        client.post("/api/new-game", json={"race": "Human", "class_name": class_name, "name": "Sim",
+                                           "weapon": weapon, "armor": armor or None})
 
         path = next(gs.SESSIONS_DIR.glob("*.json"))
         data = json.loads(path.read_text())
-        char = data["character"]
-        hit_die = CLASSES[class_name]["hit_die"]
-        char["level"] = level
-        # Spend ability score improvements: primary ability first, then Constitution
-        primary = CLASSES[class_name]["primary_ability"].lower()
-        scores = {a: char[f"{a}_score"] for a in (primary, "constitution")}
-        increases = {}
-        for _ in range(asi_points_earned(level)):
-            ability = primary if scores[primary] < ABILITY_SCORE_CAP else "constitution"
-            scores[ability] += 1
-            increases[ability] = increases.get(ability, 0) + 1
-        char["ability_increases"] = increases
-        con = (scores["constitution"] - 10) // 2
-        char["max_hit_points"] = char["current_hit_points"] = (
-            hit_die + con + (level - 1) * max(1, hit_die // 2 + 1 + con))
-        char.pop("power_points", None)   # restored at max for the level
-        name, healing = _potion_for(level)
-        char["inventory"] = [{"name": name, "description": "", "type": "potion",
-                              "healing_amount": healing}] * potions
+        _prepare(data, class_name, target, level, potions)
 
-        boss_areas = _boss_areas()
+        if seed is not None:
+            random.seed(seed)
+
+        # The world only starts the fight it rolled itself, so a chosen one is started with the
+        # functions POST /api/engage calls.
+        session = gs.GameSession.from_dict(data)
         if isinstance(target, tuple):
-            data["act_num"], data["location_name"], data["area_id"] = target
-            path.write_text(json.dumps(data))
-            client.get("/battle/start")
-        elif target in boss_areas:
-            data["act_num"], data["location_name"], data["area_id"] = boss_areas[target]
-            data["defeated_bosses"] = BOSSES[target].get("requires", [])
-            path.write_text(json.dumps(data))
-            client.post("/battle/boss")
-        else:   # ambush boss: no area, start it directly
-            session = gs.GameSession.from_dict(data)
-            begin_boss_battle(session, target)
-            path.write_text(json.dumps(session.to_dict()))
+            stands = fight.begin_random_battle(session)
+        else:
+            stands = fight.begin_boss_battle(session, target)
+        fight.opened(session, stands)
+        path.write_text(json.dumps(session.to_dict()))
 
         known = [(aid, a) for aid, a in ABILITIES.items()
                  if class_name in a["classes"] and level >= a["unlock_level"]]
 
-        for rounds in range(200):
-            data = json.loads(path.read_text())
-            char = data["character"]
-            hp_fraction = char["current_hit_points"] / char["max_hit_points"]
-            if not data["battle"]["is_active"]:
-                return char["current_hit_points"] > 0, rounds, hp_fraction
-
-            pp = char["power_points"]
-            heals = [aid for aid, a in known if a.get("heal") and a["cost"] <= pp]
-            if hp_fraction < 0.45 and char["inventory"]:
-                client.post("/battle/item", data={"item_index": 0})
-                continue
-            if hp_fraction < 0.45 and heals:
-                client.post("/battle/ability", data={"ability_id": heals[-1]})
-                continue
-
-            active_sources = {e["source"] for e in data["battle"]["player_effects"]}
-            buffs = [aid for aid, a in known
-                     if a["target"] == "self" and not a.get("heal") and a["cost"] <= pp
-                     and any(e["duration"] == 0 for e in a.get("effects", []))
-                     and a["name"] not in active_sources]
-            if buffs and rounds < 3:
-                client.post("/battle/ability", data={"ability_id": buffs[0]})
-                continue
-
-            attacks = [(_expected_damage(a, level), aid) for aid, a in known
-                       if a["cost"] <= pp and _expected_damage(a, level) > 0]
-            if attacks:
-                client.post("/battle/ability", data={"ability_id": max(attacks)[1]})
-            else:
-                client.post("/battle/attack")
+        battle = client.get("/api/battle").json()["battle"]
+        for actions_sent in range(200):
+            if battle["phase"] != "fight":
+                player = battle["player"]
+                return battle["phase"] == "victory", actions_sent, player["hp"] / player["max_hp"]
+            route, body = _next_action(battle, known, level, actions_sent)
+            battle = client.post(f"/api/battle/{route}", json=body).json()["battle"]
     return False, 200, 0.0
 
 
@@ -201,6 +219,7 @@ def main():
     parser.add_argument("--trials", type=int, default=20)
     parser.add_argument("--potions", type=int, default=None, help="default: 3 for bosses, 1 for monsters")
     parser.add_argument("--level-delta", type=int, default=0, help="player levels above the target")
+    parser.add_argument("--seed", type=int, default=0, help="trial t of every cell uses seed SEED + t")
     parser.add_argument("--only", default="", help="comma-separated boss ids or location names")
     args = parser.parse_args()
 
@@ -220,8 +239,8 @@ def main():
             level = max(1, level + args.level_delta)
             cells = []
             for class_name in classes:
-                results = [run_fight(class_name, target, level, potions, sessions_dir)
-                           for _ in range(args.trials)]
+                results = [run_fight(class_name, target, level, potions, sessions_dir, args.seed + trial)
+                           for trial in range(args.trials)]
                 wins = sum(r[0] for r in results) / args.trials
                 rounds = statistics.mean(r[1] for r in results)
                 hp = statistics.mean(r[2] for r in results)

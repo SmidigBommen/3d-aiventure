@@ -1,8 +1,7 @@
 """Exploration events, as functions of a GameSession: the pending event as the client shows it,
 the player's choice and what follows the outcome.
 
-No Request, no saving, no redirects: the classic routes (web/routes/game.py) and the API routes
-(web/api/event.py) both call these. The rules themselves are in engine/events.py.
+No Request, no saving: the API routes (web/api/event.py) call these. The rules themselves are in engine/events.py.
 """
 
 from engine.events import resolve_event_choice, scaled_dc
@@ -99,7 +98,7 @@ def dismiss(session: GameSession):
 
 
 def can_start_battle(session: GameSession) -> bool:
-    """Whether a random fight can start where the character stands (the conditions of GET /battle/start)."""
+    """Whether a random fight can start where the character stands."""
     area = session.current_area
     return bool(not session.battle.is_active and area and area.get("monster_types")
                 and session.character.current_hit_points > 0)
@@ -114,6 +113,4 @@ def carry_on(session: GameSession) -> str:
         return "world"
     definition = get_events().get(result.get("event_id"), {})
     place = "landmark" if definition.get("special") else "event"
-    if fight.begin_random_battle(session, place=place):
-        return "fight"
-    return fight.end_battle(session, False)
+    return fight.opened(session, fight.begin_random_battle(session, place=place))

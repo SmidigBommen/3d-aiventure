@@ -74,7 +74,6 @@ def create_save(session: GameSession) -> dict:
     metadata = _extract_metadata(session)
 
     session_data = session.to_dict()
-    session_data["_flash"] = {}
     session_data["battle_rewards"] = None
 
     save_data = {
@@ -106,7 +105,6 @@ def overwrite_save(save_id: str, session: GameSession) -> Optional[dict]:
     metadata = _extract_metadata(session)
 
     session_data = session.to_dict()
-    session_data["_flash"] = {}
     session_data["battle_rewards"] = None
 
     save_data = {

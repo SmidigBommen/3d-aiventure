@@ -1,4 +1,4 @@
-"""Character creation as functions, shared by the classic routes and the JSON API.
+"""Character creation as functions, called by the JSON API.
 
 No Request, no saving. `create` raises fight.Rejected before anything on the session changed.
 """

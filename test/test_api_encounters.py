@@ -15,8 +15,7 @@ from fastapi.testclient import TestClient
 from dice import Dice
 import web.game_session as game_session
 from web.app import app
-from web.routes import game as game_routes
-from web import world
+from web import creation, save_manager, world
 
 CAMPAIGN = game_session.get_campaign()
 EVENTS = game_session.get_events()
@@ -39,14 +38,16 @@ def act_of(location_name):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(game_session, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(save_manager, "SAVES_DIR", tmp_path / "saves")
     with TestClient(app) as c:
-        c.sessions_dir = tmp_path
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Fighter"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
-            "skills": ["Athletics", "Perception"]})
+        c.sessions_dir = sessions
+        assert c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+            "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
+            "skills": ["Athletics", "Perception"]}).status_code == 200
         data = load(c)
         data["character"]["max_hit_points"] = data["character"]["current_hit_points"] = 9999
         c.base = data
@@ -85,7 +86,7 @@ def planted(where, seq=4, monster=None, event=None):
 def force(monkeypatch, kind):
     monkeypatch.setattr(random, "random", lambda: 0.0 if kind == "monster" else 0.999)
     if kind == "event":
-        monkeypatch.setattr(game_routes, "EVENT_CHANCE", 1.1)
+        monkeypatch.setattr(world, "EVENT_CHANCE", 1.1)
 
 
 def refused(response, status, code):
@@ -99,30 +100,32 @@ def win_fight(client, monkeypatch):
     for _ in range(200):
         if not load(client)["battle"]["is_active"]:
             return
-        client.post("/battle/attack", follow_redirects=False)
+        client.post("/api/battle/attack", json={})
     raise AssertionError("the fight did not end")
 
 
 class TestRoll:
     @pytest.mark.parametrize("where", RATED)
-    def test_entry_gives_what_classic_explore_gives(self, client, where):
+    def test_entry_gives_what_the_roll_gives(self, client, where):
         for seed in range(150):
             place(client, where)
             random.seed(seed)
-            contents = client.post("/api/enter").json()["contents"]
-            place(client, where)
+            rolled = world.roll_explore(game_session.GameSession.from_dict(load(client)))
             random.seed(seed)
-            target = client.post("/game/explore", follow_redirects=False).headers["location"]
+            contents = client.post("/api/enter").json()["contents"]
             stored = load(client)
-            if contents["monster"]:
-                assert target == "/battle"
-                fought = stored["battle"]["monster"]
-                assert (fought["race"], fought["level"], fought["name"]) == (
+            if rolled["monster"]:
+                assert contents["event"] is None and stored["pending_event"] is None
+                kept = stored["area_contents"]["monster"]
+                assert {key: value for key, value in kept.items() if key != "id"} == rolled["monster"]
+                assert (rolled["monster"]["race"], rolled["monster"]["level"], rolled["monster"]["name"]) == (
                     contents["monster"]["race"], contents["monster"]["level"], contents["monster"]["name"])
-            elif contents["event"]:
-                assert target == "/game/event" and stored["pending_event"] == contents["event"]["id"]
+            elif rolled["event"]:
+                assert contents["monster"] is None and contents["event"]["id"] == rolled["event"]
+                assert stored["area_contents"]["event"] == {"id": rolled["event"]}
             else:
-                assert target == "/game?explored=true"
+                assert contents["monster"] is None and contents["event"] is None
+            assert stored["battle"]["is_active"] is False and contents["seq"] == 1
 
     def test_roll_explore_changes_nothing(self, client):
         place(client, "Whispering Woods/clearing")
@@ -140,11 +143,11 @@ class TestRoll:
             monster = client.post("/api/enter").json()["contents"]["monster"]
             assert monster
             body = client.post("/api/engage", json={"id": monster["id"]}).json()
-            assert body["url"] == "/battle"
+            assert set(body) == {"state", "battle", "event"}
             assert body["state"]["contents"]["monster"] is None
-            assert body["state"]["pending"] == {"kind": "battle", "url": "/battle"}
+            assert body["state"]["pending"] == {"kind": "battle"}
             stored = load(client)
-            assert stored["battle"]["is_active"] is True and stored["return_to_3d"] is True
+            assert stored["battle"]["is_active"] is True and body["battle"]["monster"]["name"] == monster["name"]
             fought = stored["battle"]["monster"]
             assert (fought["race"], fought["level"], fought["name"]) == (
                 monster["race"], monster["level"], monster["name"])
@@ -213,25 +216,24 @@ class TestEntering:
         assert body["contents"]["seq"] == 5
         assert load(client)["area_contents"]["area_id"] == "clearing"
 
-        client.post("/game/move", data={"area_id": "entrance"})
+        client.post("/api/move", json={"area_id": "entrance"})
         stored = load(client)["area_contents"]
         assert (stored["seq"], stored["area_id"]) == (6, "entrance")
         assert (stored["monster"] or {}).get("id") != "planted-1"
 
-        client.post("/game/travel", data={"location_name": "Rivermeet Town"})
+        body = client.post("/api/travel", json={"location": "Rivermeet Town"}).json()
+        assert body["battle"] is None and body["state"]["contents"]["seq"] == 7
         stored = load(client)["area_contents"]
         assert (stored["seq"], stored["location"], stored["area_id"]) == (7, "Rivermeet Town", "town_square")
 
     def test_revive(self, client):
         where = "Whispering Woods/clearing"
-        place(client, where, planted(where), char_current_hit_points=0, return_to_3d=True)
-        response = client.post("/battle/revive", follow_redirects=False)
-        assert response.headers["location"] == "/"
+        place(client, where, planted(where), char_current_hit_points=0)
+        body = client.post("/api/battle/revive", json={}).json()
+        assert body["state"]["pending"] is None and body["state"]["area"]["id"] == "entrance"
+        assert body["state"]["contents"]["seq"] == 5
         stored = load(client)["area_contents"]
         assert (stored["seq"], stored["area_id"]) == (5, "entrance")
-
-        place(client, where, planted(where), char_current_hit_points=0)
-        assert client.post("/battle/revive", follow_redirects=False).headers["location"] == "/game?revived=true"
 
 
 class TestSearch:
@@ -285,13 +287,13 @@ class TestOneTimeEvents:
         assert "bridge_runes" not in load(client)["completed_events"]
 
         body = client.post("/api/engage", json={"id": "bridge_runes"}).json()
-        assert body["url"] == "/game/event" and body["state"]["pending"]["url"] == "/game/event"
+        assert set(body) == {"state", "battle", "event"} and body["state"]["pending"] == {"kind": "event"}
         assert body["state"]["contents"]["event"] is None
         assert load(client)["pending_event"] == "bridge_runes"
-        assert EVENTS["bridge_runes"]["title"] in client.get("/game/event").text
-        client.post("/game/event/choose", data={"choice": 0})
-        response = client.post("/game/event/continue", follow_redirects=False)
-        if load(client)["battle"]["is_active"] or response.headers["location"] != "/":
+        assert client.get("/api/event").json()["event"]["title"] == EVENTS["bridge_runes"]["title"]
+        assert client.post("/api/event/choose", json={"choice": 0}).status_code == 200
+        answer = client.post("/api/event/continue", json={}).json()
+        if load(client)["battle"]["is_active"] or answer["battle"] is not None:
             pytest.skip("the outcome started a fight")
         assert "bridge_runes" in load(client)["completed_events"]
         for _ in range(25):
@@ -328,7 +330,7 @@ class TestBoss:
         rolls = iter([20])
         monkeypatch.setattr(Dice, "roll_d20", lambda: next(rolls, 1))
         body = client.post("/api/engage", json={"id": "Shard Guardian"}).json()
-        assert body["url"] == "/battle"
+        assert set(body) == {"state", "battle", "event"} and body["battle"]["monster"]["is_boss"] is True
         stored = load(client)
         assert stored["battle"]["monster"]["boss_id"] == "Shard Guardian"
         assert stored["area_contents"]["monster"]["id"] == "planted-1"
@@ -394,33 +396,40 @@ class TestRefusals:
         assert _path(client).read_bytes() == before
 
 
-class TestClassicExplore:
+class TestRollContents:
     @pytest.mark.parametrize("before", [None, "monster", "event"])
     def test_monster(self, client, monkeypatch, before):
         where = "Whispering Woods/clearing"
         place(client, where, planted(where, monster=GOBLIN if before == "monster" else None,
                                      event="mossy_shrine" if before == "event" else None))
         force(monkeypatch, "monster")
-        response = client.post("/game/explore", follow_redirects=False)
-        assert (response.status_code, response.headers["location"]) == (303, "/battle")
-        stored = load(client)
+        session = game_session.GameSession.from_dict(load(client))
+        assert world.roll_contents(session) is session.area_contents
+        stored = session.to_dict()
         area = next(a for _, loc, a in ALL_AREAS if loc["name"] == "Whispering Woods" and a["id"] == "clearing")
-        assert stored["battle"]["monster"]["race"] in area["monster_types"]
-        assert stored["battle"]["monster"]["name"] != "Grak"
-        assert stored["area_contents"] == {**planted(where, seq=5), "spent": None}
-        assert stored["pending_event"] is None
+        assert stored["area_contents"]["monster"]["race"] in area["monster_types"]
+        assert stored["area_contents"]["monster"]["name"] != "Grak"
+        assert {**stored["area_contents"], "monster": None} == {**planted(where, seq=5), "spent": None}
+        assert stored["pending_event"] is None and stored["battle"]["is_active"] is False
+        if before is None:
+            contents = client.post("/api/search").json()["contents"]
+            assert contents["seq"] == 5 and contents["monster"]["race"] in area["monster_types"]
+            assert contents["event"] is None and load(client)["battle"]["is_active"] is False
 
     def test_event_and_nothing(self, client, monkeypatch):
         where = "Whispering Woods/clearing"
         with monkeypatch.context() as m:
             force(m, "event")
             place(client, where)
-            assert client.post("/game/explore", follow_redirects=False).headers["location"] == "/game/event"
+            event = client.post("/api/enter").json()["contents"]["event"]
+            assert event and event["id"] in EVENTS
             stored = load(client)
-            assert stored["pending_event"] and stored["area_contents"] == {**planted(where, seq=1), "spent": None}
+            assert stored["pending_event"] is None
+            assert stored["area_contents"] == {**planted(where, seq=1, event=event["id"]), "spent": None}
         force(monkeypatch, "nothing")
         place(client, where)
-        assert client.post("/game/explore", follow_redirects=False).headers["location"] == "/game?explored=true"
+        contents = client.post("/api/enter").json()["contents"]
+        assert contents["monster"] is None and contents["event"] is None
         assert load(client)["area_contents"] == {**planted(where, seq=1), "spent": None}
 
     def test_rolls_nothing_during_a_battle(self, client):
@@ -428,56 +437,50 @@ class TestClassicExplore:
         place(client, where, planted(where, monster=GOBLIN))
         client.post("/api/engage", json={"id": "planted-1"})
         before = _path(client).read_bytes()
-        assert client.post("/game/explore", follow_redirects=False).headers["location"] == "/battle"
+        assert client.post("/api/enter").json()["pending"] == {"kind": "battle"}
+        refused(client.post("/api/search"), 409, "pending")
         assert _path(client).read_bytes() == before
 
 
 class TestWayBack:
-    @pytest.mark.parametrize("from_3d", [True, False])
-    def test_fight(self, client, monkeypatch, from_3d):
+    def test_fight(self, client, monkeypatch):
         where = "Whispering Woods/clearing"
 
         def start():
             place(client, where, planted(where, monster=GOBLIN))
-            if from_3d:
-                client.post("/api/engage", json={"id": "planted-1"})
-            else:
-                with monkeypatch.context() as m:
-                    force(m, "monster")
-                    client.post("/game/explore")
-            assert load(client)["battle"]["is_active"] and load(client)["return_to_3d"] is from_3d
+            client.post("/api/engage", json={"id": "planted-1"})
+            assert load(client)["battle"]["is_active"]
 
         monkeypatch.setattr(Dice, "roll_d20", lambda: 20)
         start()
-        response = client.post("/battle/flee", follow_redirects=False)
-        assert response.headers["location"] == ("/" if from_3d else "/game")
-        assert ("game_message" in load(client)["_flash"]) is (not from_3d)
+        body = client.post("/api/battle/flee", json={}).json()
+        assert body["battle"]["phase"] == "fled" and body["state"]["pending"] is None
+        assert body["state"]["area"]["id"] == "clearing" and body["state"]["contents"]["monster"]["id"] == "planted-1"
 
         start()
         win_fight(client, monkeypatch)
-        link = 'href="/" id="back-link"' if from_3d else 'href="/game" id="back-link"'
-        assert link in client.get("/battle/victory").text
+        state = client.get("/api/state").json()
+        assert state["pending"] is None and state["area"]["id"] == "clearing"
+        assert state["contents"]["monster"] is None
+        assert client.post("/api/battle/continue", json={}).json()["battle"]["phase"] == "none"
 
         start()
         data = load(client)
         data["battle"]["is_active"] = False
         data["character"]["current_hit_points"] = 0
         _path(client).write_text(json.dumps(data), encoding="utf-8")
-        response = client.post("/battle/revive", follow_redirects=False)
-        assert response.headers["location"] == ("/" if from_3d else "/game?revived=true")
+        body = client.post("/api/battle/revive", json={}).json()
+        assert body["state"]["pending"] is None and body["state"]["area"]["id"] == "entrance"
 
-    @pytest.mark.parametrize("from_3d", [True, False])
-    def test_event(self, client, monkeypatch, from_3d):
+    def test_event(self, client):
         where = "Whispering Woods/clearing"
         place(client, where, planted(where, event="mossy_shrine"))
-        if from_3d:
-            client.post("/api/engage", json={"id": "mossy_shrine"})
-        else:
-            force(monkeypatch, "event")
-            client.post("/game/explore")
+        client.post("/api/engage", json={"id": "mossy_shrine"})
         data = load(client)
         data["pending_event"] = None
         data["event_result"] = {"title": "T", "text": "x"}
         _path(client).write_text(json.dumps(data), encoding="utf-8")
-        response = client.post("/game/event/continue", follow_redirects=False)
-        assert response.headers["location"] == ("/" if from_3d else "/game")
+        assert client.get("/api/state").json()["pending"] == {"kind": "event"}
+        body = client.post("/api/event/continue", json={}).json()
+        assert body["battle"] is None and body["state"]["pending"] is None
+        assert body["state"]["area"]["id"] == "clearing" and load(client)["event_result"] is None
