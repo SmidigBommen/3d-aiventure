@@ -7,6 +7,7 @@ import {
 } from './creation';
 import { slotLine, slotRows, type SavesView } from './saves';
 import { FOV_RANGE, KEY_LIST, SENSITIVITY_RANGE, clampSettings, type Settings } from './settings';
+import { VOLUME_RANGE, type SoundSettings } from './sound/volume';
 import type { PanelMessage } from './world/sheetPanel';
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -338,7 +339,7 @@ export function renderSaves(view: SavesView, mode: SavesMode, confirm: SaveConfi
 
 // --- settings ------------------------------------------------------------------------------------
 
-export function bindSettingsPanel(handlers: { change: (settings: Settings) => void; close: () => void }): void {
+export function bindSettingsPanel(handlers: { change: (settings: Settings) => void; sound: (sound: SoundSettings) => void; close: () => void }): void {
   const sensitivity = el<HTMLInputElement>('set-sensitivity');
   const invert = el<HTMLInputElement>('set-invert-y');
   const fov = el<HTMLInputElement>('set-fov');
@@ -352,6 +353,18 @@ export function bindSettingsPanel(handlers: { change: (settings: Settings) => vo
     field.addEventListener('input', changed);
     field.addEventListener('change', changed);
   }
+  // The sound: two volumes and mute, kept apart from the settings above.
+  const effects = el<HTMLInputElement>('settings-effects');
+  const ambience = el<HTMLInputElement>('settings-ambience');
+  const mute = el<HTMLInputElement>('settings-mute');
+  for (const field of [effects, ambience]) {
+    field.min = String(VOLUME_RANGE.min);
+    field.max = String(VOLUME_RANGE.max);
+    field.step = String(VOLUME_RANGE.step);
+  }
+  const heard = (): void => handlers.sound({ effects: Number(effects.value), ambience: Number(ambience.value), muted: mute.checked });
+  for (const field of [effects, ambience]) field.addEventListener('input', heard);
+  mute.addEventListener('change', heard);
   el('settings-close').addEventListener('click', () => handlers.close());
   el('settings-keys').replaceChildren(...KEY_LIST.map((entry) =>
     node('div', 'settings-key', '', [node('kbd', '', entry.keys), node('span', '', entry.action)])));
@@ -359,6 +372,17 @@ export function bindSettingsPanel(handlers: { change: (settings: Settings) => vo
 
 export function showSettingsPanel(on: boolean): void {
   el('settings-panel').hidden = !on;
+}
+
+/** The sound controls at the sound settings in use. */
+export function renderSound(sound: SoundSettings): void {
+  const effects = el<HTMLInputElement>('settings-effects');
+  const ambience = el<HTMLInputElement>('settings-ambience');
+  if (Number(effects.value) !== sound.effects) effects.value = String(sound.effects);
+  if (Number(ambience.value) !== sound.ambience) ambience.value = String(sound.ambience);
+  el<HTMLInputElement>('settings-mute').checked = sound.muted;
+  el('settings-effects-value').textContent = `${Math.round(sound.effects * 100)}%`;
+  el('settings-ambience-value').textContent = `${Math.round(sound.ambience * 100)}%`;
 }
 
 /** The controls at the settings in use. */

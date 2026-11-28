@@ -94,9 +94,26 @@ export function hideTitle(): void {
   show(el('title-screen'), false);
 }
 
-/** The loading indicator, shown while an area's models are on their way. */
-export function showLoading(on: boolean): void {
-  show(el('loading'), on);
+/** The loading indicator, shown while an area's models are on their way. `card`: the location one arrives in, in place of the plain text. */
+export function showLoading(on: boolean, card: { title: string; text: string } | null = null): void {
+  const panel = el('loading');
+  if (on) {
+    panel.classList.toggle('card', card !== null);
+    el('loading-title').textContent = card?.title ?? '';
+    show(el('loading-title'), card !== null);
+    el('loading-text').textContent = card?.text ?? 'Loading the area…';
+  }
+  show(panel, on);
+}
+
+/** The red edge of low hit points, at this opacity. */
+export function showVignette(opacity: number): void {
+  el('vignette').style.opacity = String(opacity);
+}
+
+/** The line that says the sound is muted. */
+export function showMuted(muted: boolean): void {
+  show(el('hud-mute'), muted);
 }
 
 export function showMenu(open: boolean): void {

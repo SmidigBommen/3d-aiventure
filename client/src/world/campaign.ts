@@ -84,6 +84,19 @@ export function endingSteps(view: EndingView): EndingStep[] {
   ];
 }
 
+/** How long the card of a location stays on screen at least, while its first area loads. */
+export const LOADING_CARD_SECONDS = 1.5;
+
+/** What the loading panel shows on the way into another location: its name and description. null: the plain text. */
+export function loadingCard(view: TravelView | null, from: string | null, to: string): { title: string; text: string } | null {
+  if (!view || from === to) return null;
+  for (const act of view.acts) {
+    const found = act.locations.find((location) => location.name === to);
+    if (found) return { title: found.name, text: found.description };
+  }
+  return null;
+}
+
 /** The rows of "Your Legend": label and value. */
 export function legendLines(view: EndingView): [string, string][] {
   return [

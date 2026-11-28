@@ -19,15 +19,22 @@ import { buildEndingScene } from './endingScene';
 import type { Vec2 } from './input/movement';
 import type { SavesView } from './saves';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, parseSettings, serializeSettings, settingsTurn, type Settings } from './settings';
+import { createSoundEngine } from './sound/audio';
+import { ACTION_SOUNDS, ambienceFor, resultSounds, stepSound, turnSounds, type Ambience, type SoundCue } from './sound/cues';
+import { DEFAULT_SOUND, SOUND_KEY, gains, parseSound, serializeSound, toggleMute, type SoundSettings } from './sound/volume';
 import {
-  bindCreationPanel, bindOpeningPanel, bindSavesPanel, bindSettingsPanel, forgetCreationStep, renderCreation, renderSaves, renderSettings,
+  bindCreationPanel, bindOpeningPanel, bindSavesPanel, bindSettingsPanel, forgetCreationStep, renderCreation, renderSaves, renderSettings, renderSound,
   showCreationFoot, showCreationPanel, showOpening, showSavesPanel, showSettingsPanel, type SaveConfirm, type SavesMode, type SlotAction,
 } from './startPanel';
 import { buildTitleScene } from './titleScene';
-import { fade, hideHud, hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showRoadHud, showTitle, veil } from './ui';
-import { buildAreaScene, type AreaScene } from './world/areaScene';
 import {
-  ARRIVAL_SECONDS, arrivalTitle, endingSteps, travelChoiceForKey, travelChoices, type EndingView, type JournalView, type TravelView,
+  fade, hideHud, hideNotice, hideTitle, showHud, showLoading, showMenu, showMuted, showNotice, showPrompt, showRoadHud, showTitle, showVignette, veil,
+} from './ui';
+import { buildAreaScene, type AreaScene } from './world/areaScene';
+import { airFor } from './world/atmosphere';
+import {
+  ARRIVAL_SECONDS, LOADING_CARD_SECONDS, arrivalTitle, endingSteps, loadingCard, travelChoiceForKey, travelChoices,
+  type EndingView, type JournalView, type TravelView,
 } from './world/campaign';
 import {
   bindEndingPanel, bindJournalPanel, bindTravelPanel, drawCompass, renderJournal, renderTravel, showArrival, showEnding, showJournalPanel, showTravelPanel,
@@ -41,13 +48,15 @@ import {
 import { ROAD_SPEC, dressArea, dressSpecOf, type Dressing, type Placement } from './world/dressing';
 import { choiceForKey, type EventResult, type EventView } from './world/event';
 import { bindBossIntro, bindEventPanel, renderEvent, renderEventResult, showBossIntro, showEventPanel } from './world/eventPanel';
-import { EYE_HEIGHT, buildLayout, spawnPoint, type AreaLayout, type Gate } from './world/layout';
+import { EYE_HEIGHT, buildLayout, hash, spawnPoint, type AreaLayout, type Gate } from './world/layout';
 import { loadFigures, loadModels, modelErrors, type Figure } from './world/modelLoader';
 import { panelForKey, type InventoryView, type PanelKind, type SheetView } from './world/sheet';
 import { bindSheetPanels, renderInventory, renderSheet, showSheetPanel, type PanelMessage } from './world/sheetPanel';
 import { haggleFeedback, killAnnouncement, readyCount, tabForKey, type ShopTab, type ShopView } from './world/shop';
 import { bindShopPanel, renderShop, showHaggle, showShopPanel, type HaggleShown } from './world/shopPanel';
+import { bobOffset, gaitStep, shakeOf, startGait, vignette, type Shake } from './world/feel';
 import { heldKeys, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
+import { startWander, wanderStep, type Wanderer } from './world/wander';
 
 type Screen = 'title' | 'creation' | 'opening' | 'world' | 'pending' | 'battle' | 'event' | 'intro' | 'ending';
 /** The panels that open over the world while `screen` stays 'world'. */
@@ -148,6 +157,14 @@ declare global {
       readonly saves: Slots | null;
       readonly settings: Settings;
       readonly settingsOpen: boolean;
+      // Sound and feel. `sound.cues`: the last 500 cues requested since the page loaded, oldest first (also when
+      // muted; none before the first pointerdown or keydown), `count` how many in all. `monster`: where the
+      // area's monster wanders (`layout.slots.monster` stays its home). `vignette`: the opacity of the red edge
+      // in the last frame. `loadingCard`: what #loading shows while it shows the card of a location.
+      readonly sound: { unlocked: boolean; settings: SoundSettings; cues: string[]; count: number; ambience: Ambience | null };
+      readonly monster: { x: number; z: number; yaw: number; noticed: boolean } | null;
+      readonly vignette: number;
+      readonly loadingCard: { title: string; text: string } | null;
       lookAt: (x: number, z: number) => void;
       interact: () => void;
     };
@@ -169,6 +186,71 @@ function storedSettings(): Settings {
 }
 let settings = storedSettings();
 let settingsOpen = false;
+
+// Sound. Nothing sounds, and no cue is recorded, before the first pointerdown or keydown of the page.
+const CUE_LOG = 500;
+const RESULT_GAP = 0.7; // s between the cues of a fight's result
+const audio = createSoundEngine();
+function storedSound(): SoundSettings {
+  try {
+    return parseSound(localStorage.getItem(SOUND_KEY));
+  } catch {
+    return { ...DEFAULT_SOUND };
+  }
+}
+let soundSettings = storedSound();
+const cueLog: string[] = [];
+let cueCount = 0;
+let ambience: Ambience | null = null;
+let fanfare: { cue: SoundCue; at: number }[] = []; // the cues of a result still to come, by the frame clock
+let soundClock = 0;
+audio.setGains(gains(soundSettings));
+
+/** Requests a cue: the one place that records and plays. A cue asked for before the unlock is dropped. */
+function cue(name: SoundCue | null): void {
+  if (name === null || !audio.unlocked) return;
+  cueCount += 1;
+  cueLog.push(name);
+  if (cueLog.length > CUE_LOG) cueLog.shift();
+  audio.play(name);
+}
+
+/** The cue of an action of ACTION_SOUNDS (cues.ts). */
+function actionSound(key: string): void {
+  cue(Object.prototype.hasOwnProperty.call(ACTION_SOUNDS, key) ? ACTION_SOUNDS[key] : null);
+}
+
+for (const kind of ['pointerdown', 'keydown'] as const) window.addEventListener(kind, () => audio.unlock(), { capture: true });
+
+/** A change of the sound settings: in use and in the browser's storage at once. */
+function useSound(next: SoundSettings): void {
+  soundSettings = parseSound(serializeSound(next));
+  audio.setGains(gains(soundSettings));
+  try {
+    localStorage.setItem(SOUND_KEY, serializeSound(soundSettings));
+  } catch {
+    /* no storage: the sound settings last until the page is left */
+  }
+  showMuted(soundSettings.muted);
+  renderSound(soundSettings);
+}
+showMuted(soundSettings.muted);
+
+// Feel: the stride of the walk, the shake of a blow, the red edge of low hit points.
+let gait = startGait();
+let shake: (Shake & { t: number }) | null = null;
+let edge = 0; // the opacity of #vignette
+let promptShown: string | null = null; // the prompt of the last frame: a new one sounds
+
+// The monster of the area, wandering (wander.ts). `key` names the contents it belongs to.
+let roamer: { key: string; seed: number; slot: Vec2; w: Wanderer; t: number } | null = null;
+let fledTo: { key: string; x: number; z: number; yaw: number } | null = null; // where the fight stood that the monster was fled from
+
+// The card of a location, shown while its first area loads.
+let lastLocation: string | null = null; // the location whose area was last entered in this page load
+let cardView: TravelView | null = null; // the travel view the cards are read from
+let cardAsked = false; // asked for once per page load
+let card: { title: string; text: string } | null = null;
 const eye = new THREE.PerspectiveCamera(settings.fov, 1, 0.1, 400);
 eye.rotation.order = 'YXZ';
 
@@ -201,6 +283,9 @@ let duel: BattleScene | null = null; // the monster being fought, drawn
 let duelBoss = false; // it is the boss of the area: the battle scene draws it, the contents do not
 let duelOnEvent = false; // it stands where the event object stood: what is left of that is hidden meanwhile
 let duelRage: Rage | null = null; // how this boss looks in its rage
+let duelMet: { key: string; x: number; z: number; yaw: number } | null = null; // the wandering monster this fight is with, where it was met
+let soundTrack: { t: number; cue: SoundCue; event: number }[] = []; // the sounds of the turn being played
+let soundNext = 0;
 let playback: { timeline: Timeline; t: number; next: number; enrageAt: number | null } | null = null;
 
 let happening: Happening | null = null; // the event the panel shows
@@ -258,7 +343,38 @@ const stallOf = (d: Dressing | null): Placement | null => d?.placements.find((p)
 const signpostOf = (d: Dressing | null): Placement | null => d?.placements.find((p) => p.landmark === 'travel') ?? null;
 // On the road of an ambush the state is already the destination's; nothing of what that area holds is here.
 const contentsOf = (s: WorldState | null): AreaContents | null => (road ? null : (s?.contents ?? null));
-const interactionNow = (): Interaction | null => (inWorld() && !loading && !panel && layout ? interactionAt(player, layout, contentsOf(state)) : null);
+/**
+ * The wanderer of the monster the area holds now, or null when it holds none. It starts on the monster's slot
+ * when the contents come to hold a monster; one that was fled from stays where the fight stood.
+ */
+function roaming(): typeof roamer {
+  const contents = contentsOf(state);
+  const slot = layout?.slots?.monster ?? null;
+  if (!contents?.monster || !slot || !state?.location || !state.area) {
+    roamer = null;
+    return null;
+  }
+  const where = `${state.location.name}/${state.area.id}`;
+  const key = `${where}/${contents.seq}/${contents.monster.id}`;
+  if (roamer?.key !== key) {
+    const w = startWander(slot);
+    roamer = { key, seed: hash(where) + contents.seq, slot, w: fledTo?.key === key ? { ...w, x: fledTo.x, z: fledTo.z, yaw: fledTo.yaw } : w, t: 0 };
+    fledTo = null;
+  }
+  return roamer;
+}
+
+/** The layout as the prompt and the fight see it: the monster's slot is where the monster is now. */
+function layoutNow(): AreaLayout | null {
+  const roams = layout ? roaming() : null;
+  if (!layout || !layout.slots || !roams) return layout;
+  return { ...layout, slots: { ...layout.slots, monster: { x: roams.w.x, z: roams.w.z } } };
+}
+
+const interactionNow = (): Interaction | null => {
+  const here = inWorld() && !loading && !panel ? layoutNow() : null;
+  return here ? interactionAt(player, here, contentsOf(state)) : null;
+};
 const promptNow = (): string | null => (menuOpen || busy || crossing || resting || travelling ? null : (interactionNow()?.prompt ?? null));
 // Nobody walks, looks around or opens anything: a panel is on screen or the view is black for a rest or a journey.
 const heldStill = (): boolean => panel !== null || resting || travelling;
@@ -301,6 +417,13 @@ window.__aiv = {
   get road() { return road; },
   get ending() { return screen === 'ending' ? ending : null; },
   get travelling() { return travelling; },
+  get sound() { return { unlocked: audio.unlocked, settings: soundSettings, cues: [...cueLog], count: cueCount, ambience }; },
+  get monster() {
+    const roams = shown() ? roaming() : null;
+    return roams ? { x: roams.w.x, z: roams.w.z, yaw: roams.w.yaw, noticed: roams.w.noticed } : null;
+  },
+  get vignette() { return edge; },
+  get loadingCard() { return loading ? card : null; },
   lookAt(x, z) {
     if (!inWorld() || loading || heldStill()) return;
     const t = turnTowards(view, player, { x, z });
@@ -313,9 +436,24 @@ window.__aiv = {
 
 // --- screens -----------------------------------------------------------------------------------
 
-function setLoading(on: boolean): void {
+function setLoading(on: boolean, shownCard: { title: string; text: string } | null = null): void {
   loading = on;
-  showLoading(on);
+  card = on ? shownCard : null;
+  showLoading(on, card);
+}
+
+/**
+ * The card for the way into `location`, when that is another location than the one last entered in this page
+ * load. The travel view it is read from is asked for once per page load; without it the plain text shows.
+ */
+async function cardFor(location: string): Promise<{ title: string; text: string } | null> {
+  if (location === lastLocation) return null;
+  if (!atlas && !cardView && !cardAsked) {
+    cardAsked = true;
+    const answer = await fetchTravel().catch(() => null);
+    if (answer?.ok) cardView = answer.travel;
+  }
+  return loadingCard(atlas ?? cardView, lastLocation, location);
 }
 
 function leaveWorld(): void {
@@ -396,25 +534,38 @@ async function showContents(next: WorldState): Promise<void> {
 async function enterArea(next: WorldState, cameFrom: string | null, at: { x: number; z: number; yaw: number } | null = null): Promise<void> {
   if (!next.location || !next.area) return;
   const mine = ++entry;
-  setLoading(true);
+  // Into another location: its card, for LOADING_CARD_SECONDS at least and until the models are in. The
+  // indicator waits for the card (the travel view may have to be asked for), so that it never shows the plain
+  // text first and the card a moment later; nobody walks meanwhile.
+  if (next.location.name === lastLocation) setLoading(true);
+  else {
+    loading = true;
+    card = null;
+  }
   if (screen === 'title') hideTitle();
+  const shownCard = await cardFor(next.location.name);
+  if (mine !== entry) return;
+  setLoading(true, shownCard);
   const spec = dressSpecOf({ location: next.location, area: next.area, exits: next.exits });
   const dressed = dressArea(buildLayout(spec), spec);
   // A model that fails to load comes back as null and is drawn as a box.
   const [models, figures] = await Promise.all([
     loadModels(dressed.placements.map((p) => p.model)),
     loadFigures(contentModels(dressed.layout, contentsOf(next), landmarkOf(dressed))),
+    shownCard ? wait(LOADING_CARD_SECONDS * 1000) : null,
   ]);
   if (mine !== entry) return;
   things?.dispose();
   things = null;
   area?.dispose();
-  area = buildAreaScene(dressed, next.exits, models);
+  area = buildAreaScene(dressed, next.exits, models, null, airFor(next.location.name, next.location.type));
   layout = dressed.layout;
   dressing = dressed;
   road = false;
   ambush = null;
   state = next;
+  lastLocation = next.location.name;
+  gait = startGait();
   placeContents(contentsOf(next), figures);
   const start = at && walkLayout && isFree(at, walkLayout) ? at : spawnPoint(dressed.layout, cameFrom);
   player = { x: start.x, z: start.z };
@@ -440,7 +591,8 @@ async function enterRoad(next: WorldState): Promise<void> {
   area?.dispose();
   const start = spawnPoint(dressed.layout, null);
   const foe = dressed.layout.slots?.monster ?? { x: start.x, z: start.z - 1 };
-  area = buildAreaScene(dressed, [], models, { from: start, to: foe });
+  area = buildAreaScene(dressed, [], models, { from: start, to: foe }, airFor(ROAD_SPEC.location, ROAD_SPEC.type));
+  gait = startGait();
   layout = dressed.layout;
   dressing = dressed;
   road = true;
@@ -579,6 +731,7 @@ async function refresh(): Promise<void> {
 async function crossGate(gate: Gate): Promise<void> {
   const from = state?.area?.id ?? null;
   crossing = true;
+  actionSound('gate');
   veil(true);
   const answer = await postMove(gate.exitId);
   if (answer.ok && !answer.state.pending && answer.state.area) {
@@ -598,6 +751,9 @@ async function engage(id: string): Promise<void> {
   if (busy || !state?.location || !state.area) return;
   busy = true;
   held.clear();
+  // A wandering monster is fought where it stands at this moment.
+  const roams = roaming();
+  const met = roams && contentsOf(state)?.monster?.id === id ? { key: roams.key, x: roams.w.x, z: roams.w.z, yaw: roams.w.yaw } : null;
   const point: ReturnPoint = { location: state.location.name, area: state.area.id, x: player.x, z: player.z, yaw: view.yaw };
   try {
     sessionStorage.setItem(RETURN_KEY, JSON.stringify(point));
@@ -608,7 +764,7 @@ async function engage(id: string): Promise<void> {
   if (answer.ok && answer.battle) {
     // A fight is fought here; the saved place is for an event, which a reload has to find again.
     forgetReturn();
-    await startBattle(answer.battle, answer.state);
+    await startBattle(answer.battle, answer.state, met);
     return;
   }
   if (answer.ok && answer.event) {
@@ -654,6 +810,10 @@ function closeBattle(): void {
   duelBoss = false;
   duelOnEvent = false;
   duelRage = null;
+  duelMet = null;
+  soundTrack = [];
+  fanfare = [];
+  shake = null;
   if (duel) {
     area?.scene.remove(duel.group);
     duel.dispose();
@@ -666,13 +826,16 @@ function closeBattle(): void {
  * Opens the fight `battle` in the area that stands: the player is held at the battle stance in front
  * of the monster, which stands where the view's `place` says, and the turn in the view is shown.
  */
-async function startBattle(battle: BattleView, next: WorldState): Promise<void> {
+async function startBattle(battle: BattleView, next: WorldState, met: { key: string; x: number; z: number; yaw: number } | null = null): Promise<void> {
   if (!layout || !layout.slots || !area) return;
   const mine = entry;
   const slots = layout.slots;
   const bossId = battle.monster.boss_id;
-  const slot = fightSlot(slots, battle.monster.place);
+  // `met`: the wandering monster was engaged where it stood; a fight found on a page load stands on its slot.
+  const slot = met && fightSlot(slots, battle.monster.place) === slots.monster ? { x: met.x, z: met.z } : fightSlot(slots, battle.monster.place);
   closeBattle();
+  duelMet = met;
+  gait = startGait();
   stance = battleStance(player, slot, walkLayout ?? layout);
   stancePitch = 0;
   glide = { x: player.x, z: player.z, yaw: view.yaw, pitch: view.pitch, t: 0 };
@@ -732,6 +895,8 @@ function present(battle: BattleView): void {
   fight.locked = true;
   renderBattle(battle, true, timeline.start);
   playback = { timeline, t: 0, next: 0, enrageAt: enrageCue(battle.turn.events, timeline)?.t ?? null };
+  soundTrack = turnSounds(battle.turn.events, timeline);
+  soundNext = 0;
 }
 
 /** The view as it is after its turn: the buttons open again, or the result panel. `atOnce`: nothing was played. */
@@ -748,6 +913,8 @@ function settle(atOnce: boolean): void {
   if (battle.phase === 'victory' || battle.phase === 'defeat') {
     fight.result = battle.phase;
     showResult(battle);
+    // The cues of the result, one after the other.
+    fanfare = resultSounds(battle).map((name, i) => ({ cue: name, at: soundClock + i * RESULT_GAP }));
   }
 }
 
@@ -777,6 +944,13 @@ function advancePlayback(dt: number): void {
   playback.t += dt;
   const { cues, inputAt } = playback.timeline;
   while (playback.next < cues.length && cues[playback.next].t <= playback.t) runCue(cues[playback.next++]);
+  // Each event sounds, and shakes the view when it is a blow, as its effect shows.
+  while (soundNext < soundTrack.length && soundTrack[soundNext].t <= playback.t) {
+    const sounded = soundTrack[soundNext++];
+    cue(sounded.cue);
+    const jolt = fight ? shakeOf(fight.view.turn.events[sounded.event]) : null;
+    if (jolt) shake = { ...jolt, t: 0 };
+  }
   if (playback.enrageAt !== null && playback.t >= playback.enrageAt && fight) {
     // The boss flies into its rage: its line across the view, and its look from here on.
     playback.enrageAt = null;
@@ -811,6 +985,7 @@ async function act(action: BattleAction): Promise<void> {
   if (mine !== entry || !fight) return;
   if (!answer.ok) {
     // Refused: say why and show what the server says is true now.
+    actionSound('refused');
     showNotice(answer.message);
     const now = await fetchBattle();
     if (mine !== entry || !fight) return;
@@ -825,6 +1000,11 @@ async function act(action: BattleAction): Promise<void> {
     return;
   }
   if (answer.battle.phase === 'fled' || answer.battle.phase === 'none') {
+    // The monster that was fled from stays where the fight stood.
+    if (answer.battle.phase === 'fled') {
+      fledTo = duelMet;
+      actionSound('fled');
+    }
     await resumeWalk(answer.state);
     if (answer.battle.phase === 'fled') showNotice(`You slip away from ${name}!`);
     return;
@@ -837,6 +1017,7 @@ async function act(action: BattleAction): Promise<void> {
 async function proceed(): Promise<void> {
   if (!fight || fight.result !== 'victory' || busy) return;
   busy = true;
+  actionSound('battle_continue');
   const mine = entry;
   const announcement = killAnnouncement(fight.view.rewards?.quest_updates ?? []);
   const crowned = fight.view.rewards?.boss?.campaign_complete === true;
@@ -864,9 +1045,11 @@ async function riseAgain(): Promise<void> {
   busy = false;
   if (mine !== entry) return;
   if (!answer.ok || !answer.state.area) {
+    actionSound('refused');
     await refresh();
     return;
   }
+  actionSound('revive');
   closeBattle();
   if (road) {
     await finishJourney(answer.state);
@@ -877,6 +1060,10 @@ async function riseAgain(): Promise<void> {
 }
 
 bindBattlePanel({ act: (action) => void act(action), proceed: () => void proceed(), revive: () => void riseAgain() });
+// Start Over is a link to the classic creation page: it sounds as it is followed.
+document.getElementById('battle-result')?.addEventListener('click', (event) => {
+  if ((event.target as HTMLElement).closest('a')) actionSound('start_over');
+});
 
 function battleKey(event: KeyboardEvent): void {
   if (event.ctrlKey || event.altKey || event.metaKey) return;
@@ -935,10 +1122,12 @@ async function chooseEvent(index: number): Promise<void> {
   if (mine !== entry || screen !== 'event') return;
   if (!answer.ok || !answer.result) {
     // Refused: show what the server says is true now.
+    actionSound('refused');
     closeEvent();
     await refresh();
     return;
   }
+  actionSound(answer.result.leveled_up ? 'event_levelup' : answer.result.success ? 'event_success' : 'event_failure');
   happening = { view: null, result: answer.result };
   renderEventResult(answer.result, false);
   await showContents(answer.state);
@@ -949,6 +1138,7 @@ async function proceedEvent(): Promise<void> {
   const result = screen === 'event' ? (happening?.result ?? null) : null;
   if (!result || busy) return;
   busy = true;
+  actionSound('event_continue');
   renderEventResult(result, true);
   const mine = entry;
   const answer = await postEventContinue();
@@ -1007,6 +1197,7 @@ function closeIntro(): void {
 /** Fight: the challenge goes to the server and the fight starts. */
 async function fightBoss(): Promise<void> {
   if (screen !== 'intro' || introBoss === null) return;
+  actionSound('intro_fight');
   if (ambush) {
     // The fight began with the journey; here it is shown.
     const met = ambush;
@@ -1024,11 +1215,18 @@ function introKey(event: KeyboardEvent): void {
   if (moveKey(event.code) || event.code === 'KeyE' || event.code === 'Space') event.preventDefault();
   if (event.repeat) return;
   if (['Enter', 'NumpadEnter', 'Space', 'KeyE'].includes(event.code)) void fightBoss();
-  else if (event.code === 'Escape' && !ambush) closeIntro(); // nobody steps back from an ambush
+  else if (event.code === 'Escape') stepBack();
+}
+
+/** Step back from a boss's introduction, by key or button. Nobody steps back from an ambush. */
+function stepBack(): void {
+  if (ambush || screen !== 'intro') return;
+  actionSound('intro_back');
+  closeIntro();
 }
 
 bindEventPanel({ choose: (index) => void chooseEvent(index), proceed: () => void proceedEvent() });
-bindBossIntro({ fight: () => void fightBoss(), back: () => { if (!ambush) closeIntro(); } });
+bindBossIntro({ fight: () => void fightBoss(), back: stepBack });
 
 /** Searches the area further: the server rolls again and the new contents take their slots. */
 async function search(): Promise<void> {
@@ -1036,6 +1234,7 @@ async function search(): Promise<void> {
   busy = true;
   const mine = entry;
   const answer = await postSearch();
+  if (!answer.ok) actionSound('refused');
   if (mine !== entry) return;
   if (!answer.ok) {
     await refresh();
@@ -1085,6 +1284,12 @@ function closePanel(): void {
   showJournalPanel(false);
 }
 
+/** The player closes the panel that is open (its key, Esc or its Close button). */
+function dismissPanel(): void {
+  if (panel) actionSound('panel_close');
+  closePanel();
+}
+
 /** Whether I, C and the menu entries open a panel now: walking in the world, nothing else going on. */
 const panelAllowed = (): boolean => inWorld() && !loading && !crossing && !busy && !resting && !travelling && !road;
 
@@ -1096,9 +1301,11 @@ async function openPanel(kind: PanelKind): Promise<void> {
   const answer = await fetchCharacter();
   if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
   if (!answer.ok) {
+    actionSound('refused');
     showNotice(answer.message);
     return;
   }
+  actionSound('panel_open');
   character = { inventory: answer.inventory, sheet: answer.sheet };
   state = answer.state;
   showHud(answer.state, false);
@@ -1113,7 +1320,7 @@ async function openPanel(kind: PanelKind): Promise<void> {
 
 /** What I, C, J and the menu entries do: the key of the open panel closes it, another one switches. */
 function togglePanel(kind: PanelKind | 'journal'): void {
-  if (panel === kind) closePanel();
+  if (panel === kind) dismissPanel();
   else if (kind === 'journal') void openJournal();
   else void openPanel(kind);
 }
@@ -1128,12 +1335,14 @@ function takeCharacter(answer: CharacterAnswer): string {
 }
 
 /** What a button of a panel does: the action goes to the server and the panel is drawn again from the answer. */
-async function panelAction(send: () => Promise<CharacterAnswer>): Promise<void> {
+async function panelAction(send: () => Promise<CharacterAnswer>, sound: string): Promise<void> {
   if (!panel || panelLocked) return;
   panelLocked = true;
   drawPanel();
   const asked = panelAsked;
   const answer = await send();
+  // The action sounds when the answer is in, also when the panel was closed meanwhile.
+  actionSound(answer.ok ? sound : 'refused');
   if (asked !== panelAsked) return;
   panelLocked = false;
   panelMessage = { text: takeCharacter(answer), refused: !answer.ok };
@@ -1141,10 +1350,10 @@ async function panelAction(send: () => Promise<CharacterAnswer>): Promise<void> 
 }
 
 bindSheetPanels({
-  item: (action, index) => void panelAction(() => postInventory(action, index)),
-  unequip: (what) => void panelAction(() => postUnequip(what)),
-  improve: (ability) => void panelAction(() => postImprove(ability)),
-  close: () => closePanel(),
+  item: (action, index) => void panelAction(() => postInventory(action, index), action === 'use' ? 'use_potion' : 'equip'),
+  unequip: (what) => void panelAction(() => postUnequip(what), 'unequip'),
+  improve: (ability) => void panelAction(() => postImprove(ability), 'improve'),
+  close: () => dismissPanel(),
 });
 
 // --- Elara's shop ----------------------------------------------------------------------------------
@@ -1157,6 +1366,7 @@ async function openShop(at: Vec2): Promise<void> {
   const answer = await fetchShop();
   if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
   if (!answer.ok) {
+    actionSound('refused');
     showNotice(answer.message);
     return;
   }
@@ -1177,17 +1387,26 @@ async function openShop(at: Vec2): Promise<void> {
 
 function shopTab(tab: ShopTab): void {
   if (panel !== 'shop' || !store) return;
+  if (store.tab !== tab) actionSound('tab');
   store.tab = tab;
   drawPanel();
 }
 
+const SHOP_SOUNDS: Record<string, string> = {
+  buy: 'buy', sell: 'sell', accept: 'quest_accept', 'turn-in': 'quest_turn_in', abandon: 'quest_abandon',
+};
+
 /** What a button of the shop does: the action goes to the server and the panel is drawn again from the answer. */
-async function shopAction(send: () => Promise<ShopAnswer>): Promise<void> {
+async function shopAction(send: () => Promise<ShopAnswer>, action: string): Promise<void> {
   if (panel !== 'shop' || !store || panelLocked) return;
   panelLocked = true;
   drawPanel();
   const asked = panelAsked;
   const answer = await send();
+  // The action sounds when the answer is in, also when the panel was closed meanwhile.
+  if (!answer.ok) actionSound('refused');
+  else if (action === 'haggle') actionSound(answer.haggle && answer.haggle.discount > 0 ? 'haggle_success' : 'haggle_failure');
+  else actionSound(SHOP_SOUNDS[action] ?? 'refused');
   if (asked !== panelAsked || !store) return;
   panelLocked = false;
   if (answer.ok) {
@@ -1208,10 +1427,10 @@ async function shopAction(send: () => Promise<ShopAnswer>): Promise<void> {
 }
 
 bindShopPanel({
-  item: (action, index) => void shopAction(() => postShopItem(action, index)),
-  quest: (action, id) => void shopAction(() => postShopQuest(action, id)),
+  item: (action, index) => void shopAction(() => postShopItem(action, index), action),
+  quest: (action, id) => void shopAction(() => postShopQuest(action, id), action),
   tab: (tab) => shopTab(tab),
-  close: () => closePanel(),
+  close: () => dismissPanel(),
 });
 
 const wait = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
@@ -1226,6 +1445,7 @@ async function openTravel(at: Vec2): Promise<void> {
   const answer = await fetchTravel();
   if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
   if (!answer.ok) {
+    actionSound('refused');
     showNotice(answer.message);
     return;
   }
@@ -1249,6 +1469,7 @@ function chooseTravel(location: string): void {
   const choice = travelChoices(atlas).find((made) => made.location === location);
   if (!choice) return;
   if (!choice.enabled) {
+    actionSound('refused');
     panelMessage = { text: choice.reason ?? '', refused: true };
     drawPanel();
     return;
@@ -1275,6 +1496,7 @@ function announceArrival(next: WorldState): void {
 async function travelTo(location: string): Promise<void> {
   if (travelling || !inWorld() || loading) return;
   travelling = true;
+  actionSound('travel_depart');
   closePanel();
   held.clear();
   showPrompt(null);
@@ -1282,6 +1504,7 @@ async function travelTo(location: string): Promise<void> {
   const mine = entry;
   fade(true);
   const [answer] = await Promise.all([postTravel(location), wait(REST_FADE_MS)]);
+  if (!answer.ok) actionSound('refused');
   if (mine === entry) {
     if (!answer.ok) {
       showNotice(answer.message);
@@ -1325,7 +1548,7 @@ async function finishJourney(next: WorldState): Promise<void> {
   travelling = false;
 }
 
-bindTravelPanel({ choose: (location) => chooseTravel(location), close: () => closePanel() });
+bindTravelPanel({ choose: (location) => chooseTravel(location), close: () => dismissPanel() });
 
 /** Opens the journal: asks the server and shows the panel when the answer is in. */
 async function openJournal(): Promise<void> {
@@ -1335,9 +1558,11 @@ async function openJournal(): Promise<void> {
   const answer = await fetchJournal();
   if (asked !== panelAsked || mine !== entry || !panelAllowed() || menuOpen) return;
   if (!answer.ok) {
+    actionSound('refused');
     showNotice(answer.message);
     return;
   }
+  actionSound('panel_open');
   journal = answer.journal;
   state = answer.state;
   showHud(answer.state, false);
@@ -1368,6 +1593,7 @@ async function playEnding(): Promise<boolean> {
   ending = { view: answer.ending, step: 0 };
   state = answer.state;
   screen = 'ending';
+  actionSound('ending');
   hideHud();
   showEnding(ending.view, 0);
   return true;
@@ -1376,6 +1602,7 @@ async function playEnding(): Promise<boolean> {
 /** Continue in the epilogue: the next step, or after the last one the title screen. */
 function advanceEnding(): void {
   if (screen !== 'ending' || !ending) return;
+  actionSound('ending_step');
   if (ending.step >= endingSteps(ending.view).length - 1) {
     closeEnding();
     void fetchState().then((next) => apply(next, false), () => apply(null, false));
@@ -1390,12 +1617,13 @@ async function reliveEnding(): Promise<void> {
   if (panel !== 'journal' || panelLocked) return;
   panelLocked = true;
   if (!(await playEnding())) {
+    actionSound('refused');
     panelLocked = false;
     showNotice('The crown is not yet whole.');
   }
 }
 
-bindJournalPanel({ ending: () => void reliveEnding(), close: () => closePanel() });
+bindJournalPanel({ ending: () => void reliveEnding(), close: () => dismissPanel() });
 bindEndingPanel({
   proceed: () => {
     // The button keeps no focus, so that Space and Enter are not a click as well.
@@ -1414,6 +1642,7 @@ async function rest(): Promise<void> {
   const mine = entry;
   fade(true);
   const [answer] = await Promise.all([postRest(), wait(REST_FADE_MS)]);
+  actionSound(answer.ok ? 'interact_rest' : 'refused');
   if (mine === entry) showNotice(takeCharacter(answer));
   fade(false);
   await wait(REST_FADE_MS);
@@ -1424,8 +1653,14 @@ async function rest(): Promise<void> {
 async function interact(): Promise<void> {
   if (!shown() || menuOpen || crossing || busy || heldStill()) return;
   const hit = interactionNow();
-  if (!hit || hit.locked) return;
+  if (!hit) return;
+  if (hit.locked) {
+    actionSound('interact_locked');
+    return;
+  }
   const boss = hit.kind === 'boss' ? (contentsOf(state)?.boss ?? null) : null;
+  // Resting sounds when the server's answer is in.
+  if (hit.kind !== 'rest') actionSound(`interact_${hit.kind}`);
   if (hit.kind === 'rest') await rest();
   else if (hit.kind === 'shop') await openShop({ x: hit.x, z: hit.z });
   else if (hit.kind === 'travel') await openTravel(signpostOf(dressing) ?? { x: hit.x, z: hit.z });
@@ -1466,6 +1701,7 @@ async function askPreview(): Promise<void> {
 /** New game on the title screen: the creation steps over the title scene. */
 async function openCreation(): Promise<void> {
   if (!atTitle() || busy || slots) return;
+  actionSound('title_button');
   busy = true;
   const answer = await fetchCreation();
   busy = false;
@@ -1495,6 +1731,7 @@ function creationChoose(value: string): void {
   else if (step === 'armour') maker.choices = { ...choices, armor: value === '' ? null : value };
   else if (step === 'portrait') maker.choices = { ...choices, portrait: value };
   else return;
+  actionSound('creation_choice');
   makerMessage = null;
   drawCreation();
   void askPreview();
@@ -1511,6 +1748,7 @@ function creationName(text: string): void {
 function creationBack(): void {
   if (!maker || makerLocked) return;
   const before = prevStep(maker.step);
+  actionSound('creation_step');
   if (before === null) {
     closeCreation();
     // Back on the title panel as it was: with the pending link when something of the earlier game is pending.
@@ -1530,6 +1768,7 @@ async function creationNext(): Promise<void> {
   if (mine.step !== 'summary') {
     const after = nextStep(mine.step, mine.choices, mine.view);
     if (after === mine.step) return;
+    actionSound('creation_step');
     mine.step = after;
     makerMessage = null;
     drawCreation();
@@ -1540,6 +1779,7 @@ async function creationNext(): Promise<void> {
   makerMessage = null;
   drawCreation();
   const answer = await postNewGame(requestBody(mine.choices));
+  actionSound(answer.ok ? 'new_game' : 'refused');
   if (maker !== mine) return;
   makerLocked = false;
   if (!answer.ok) {
@@ -1569,6 +1809,7 @@ bindOpeningPanel({
 async function enterGame(): Promise<void> {
   const from = screen;
   if ((from !== 'title' && from !== 'opening') || !state || !state.has_character || state.pending || busy || slots) return;
+  actionSound(from === 'opening' ? 'opening_continue' : 'title_button');
   busy = true;
   // Arriving: the server rolls what the area holds when it has not yet.
   const [arrived] = await Promise.all([postEnter(), fontReady()]);
@@ -1603,9 +1844,11 @@ async function openSaves(mode: SavesMode): Promise<void> {
   const from = atTitle() ? 'title' : 'menu';
   const allowed = from === 'title' ? titleShown : menuShown;
   if (!allowed()) return;
+  actionSound(from === 'title' ? 'title_button' : 'panel_open');
   const answer = await fetchSaves();
   if (!allowed()) return;
   if (!answer.ok) {
+    actionSound('refused');
     if (from === 'menu') showNotice(answer.message);
     return;
   }
@@ -1634,13 +1877,16 @@ function closeSaves(back = true): void {
 
 /** Esc and Close: not while a save, a load or a delete is on its way, whose answer the panel has to show. */
 function dismissSaves(): void {
-  if (!slotsLocked) closeSaves();
+  if (slotsLocked || !slots) return;
+  actionSound('panel_close');
+  closeSaves();
 }
 
 /** A button of a slot: "Overwrite" and "Delete" ask first, "Save here" and "Load" act at once. */
 function slotPressed(action: SlotAction, id: string | null): void {
   if (!slots || slotsLocked || slots.confirm) return;
   if ((action === 'overwrite' || action === 'delete') && id !== null) {
+    actionSound('confirm_ask');
     slots.confirm = { action, id };
     slotsMessage = null;
     drawSaves();
@@ -1656,6 +1902,7 @@ async function slotSend(action: SlotAction, id: string | null): Promise<void> {
   mine.confirm = null;
   drawSaves();
   const answer = await postSave(action === 'overwrite' ? 'save' : action, id);
+  actionSound(!answer.ok ? 'refused' : action === 'overwrite' ? 'save' : action);
   if (slots !== mine) {
     // The panel was taken away meanwhile (the world was left). What the server did still holds: after a
     // load the session is the loaded game, so the client goes on with it.
@@ -1707,6 +1954,7 @@ bindSavesPanel({
   },
   no: () => {
     if (!slots || slotsLocked) return;
+    actionSound('panel_close');
     slots.confirm = null;
     drawSaves();
   },
@@ -1715,6 +1963,7 @@ bindSavesPanel({
 
 /** A change in the settings panel: in use and in the browser's storage at once. */
 function useSettings(next: Settings): void {
+  actionSound('settings_change');
   settings = next;
   eye.fov = next.fov;
   eye.updateProjectionMatrix();
@@ -1729,8 +1978,10 @@ function useSettings(next: Settings): void {
 function openSettings(): void {
   if (!menuShown()) return;
   settingsOpen = true;
+  actionSound('panel_open');
   showMenu(false);
   renderSettings(settings);
+  renderSound(soundSettings);
   showSettingsPanel(true);
 }
 
@@ -1741,11 +1992,26 @@ function closeSettings(back = true): void {
   if (back) showMenu(true);
 }
 
-bindSettingsPanel({ change: useSettings, close: () => closeSettings() });
+/** Esc and Close in the settings. */
+function dismissSettings(): void {
+  if (!settingsOpen) return;
+  actionSound('panel_close');
+  closeSettings();
+}
+
+bindSettingsPanel({
+  change: useSettings,
+  sound: (next) => {
+    useSound(next);
+    actionSound('settings_change');
+  },
+  close: dismissSettings,
+});
 
 /** Quit to title: nothing is sent; the session keeps its character, so Continue is offered. */
 function quitToTitle(): void {
   if (!menuShown()) return;
+  actionSound('quit');
   leaveWorld();
   screen = 'title';
   showTitle(state, saveCount);
@@ -1782,7 +2048,10 @@ document.addEventListener('pointerlockerror', () => {});
 document.addEventListener('pointerlockchange', () => {
   if (document.pointerLockElement === canvas) return;
   lockLostAt = performance.now();
-  if (inWorld() && !menuOpen && !heldStill()) setMenu(true);
+  if (inWorld() && !menuOpen && !heldStill()) {
+    actionSound('menu_open');
+    setMenu(true);
+  }
 });
 document.addEventListener('mousemove', (event) => {
   if (document.pointerLockElement !== canvas || !inWorld() || menuOpen || heldStill()) return;
@@ -1790,7 +2059,24 @@ document.addEventListener('mousemove', (event) => {
   turn(t.dYaw, t.dPitch);
 });
 
+/** Whether the key was typed into a text field, which keeps its letters. */
+function typing(event: KeyboardEvent): boolean {
+  const target = event.target as HTMLElement | null;
+  if (!target || !target.tagName) return false;
+  if (target.tagName === 'TEXTAREA' || target.isContentEditable) return true;
+  if (target.tagName !== 'INPUT') return false;
+  return !['checkbox', 'radio', 'range', 'button', 'submit'].includes((target as HTMLInputElement).type);
+}
+
 window.addEventListener('keydown', (event) => {
+  if (event.code === 'KeyN' && !event.ctrlKey && !event.altKey && !event.metaKey && !typing(event)) {
+    // N mutes and unmutes on every screen.
+    if (!event.repeat) {
+      useSound(toggleMute(soundSettings));
+      actionSound('mute');
+    }
+    return;
+  }
   if (screen === 'creation') {
     // Enter is Next and Esc is Back; every other key is for the name field.
     if (event.ctrlKey || event.altKey || event.metaKey) return;
@@ -1814,7 +2100,7 @@ window.addEventListener('keydown', (event) => {
     // The save slots or the settings are open: Esc closes them; the arrow keys belong to the sliders.
     if (event.code === 'Escape' && !event.repeat) {
       if (slots) dismissSaves();
-      else closeSettings();
+      else dismissSettings();
     }
     return;
   }
@@ -1849,7 +2135,7 @@ window.addEventListener('keydown', (event) => {
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
     if (event.repeat) return;
     const tab = tabForKey(event.code);
-    if (event.code === 'Escape') closePanel();
+    if (event.code === 'Escape') dismissPanel();
     else if (tab) shopTab(tab);
     return;
   }
@@ -1858,7 +2144,7 @@ window.addEventListener('keydown', (event) => {
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
     if (event.repeat) return;
     const choice = atlas ? travelChoiceForKey(atlas, event.code) : null;
-    if (event.code === 'Escape') closePanel();
+    if (event.code === 'Escape') dismissPanel();
     else if (choice) chooseTravel(choice.location);
     return;
   }
@@ -1867,7 +2153,7 @@ window.addEventListener('keydown', (event) => {
     // A panel is open: its own key or Esc closes it, the other key switches; nothing walks, E and M do nothing.
     if (moveKey(event.code) || event.code === 'KeyE') event.preventDefault();
     if (event.repeat) return;
-    if (event.code === 'Escape') closePanel();
+    if (event.code === 'Escape') dismissPanel();
     else if (wanted) togglePanel(wanted);
     return;
   }
@@ -1879,6 +2165,7 @@ window.addEventListener('keydown', (event) => {
     if (event.repeat) return;
     // Esc with the mouse captured releases it, which already opened the menu.
     if (event.code === 'Escape' && performance.now() - lockLostAt < 300) return;
+    actionSound(menuOpen ? 'menu_close' : 'menu_open');
     setMenu(!menuOpen);
     return;
   }
@@ -1895,6 +2182,7 @@ window.addEventListener('keyup', (event) => held.delete(event.code));
 window.addEventListener('blur', () => held.clear());
 
 document.getElementById('menu-back')?.addEventListener('click', () => {
+  actionSound('menu_close');
   setMenu(false);
   requestLock();
 });
@@ -1938,6 +2226,24 @@ renderer.setAnimationLoop(() => {
     ? compassMarks(layout, state.exits, contentsOf(state), { x: player.x, z: player.z, yaw: view.yaw })
     : null;
   drawCompass(compass, view.yaw);
+  // Sound: the cues of a result that are due, and the bed of where the player is.
+  soundClock += dt;
+  while (fanfare.length > 0 && fanfare[0].at <= soundClock) cue(fanfare.shift()!.cue);
+  const heard = ambienceFor((inWorld() || inFight() || inPanel()) && layout ? layout.type : null, inFight());
+  if (heard?.bed !== ambience?.bed || heard?.tense !== ambience?.tense) {
+    ambience = heard;
+    audio.setAmbience(heard);
+  }
+  // The red edge: by the hit points the screen shows, and none where there is no character to be hurt.
+  let hurt = 0;
+  if (inFight() && fight) hurt = vignette(fight.view.player.hp, fight.view.player.max_hp);
+  else if ((inWorld() || inPanel()) && state?.character) hurt = vignette(state.character.current_hit_points, state.character.max_hit_points);
+  if (hurt !== edge) {
+    edge = hurt;
+    showVignette(edge);
+  }
+  const walking = inWorld() && !inFight() && layout !== null && area !== null;
+  if (!walking) promptShown = null;
   if (screen === 'ending' && epilogue) {
     epilogue.update(time);
     renderer.render(epilogue.scene, epilogue.camera);
@@ -1959,7 +2265,18 @@ renderer.setAnimationLoop(() => {
       };
       if (p >= 1) glide = null;
     }
-    const off = duel?.eye() ?? { forward: 0, side: 0, up: 0, roll: 0 };
+    const off = { ...(duel?.eye() ?? { forward: 0, side: 0, up: 0, roll: 0 }) };
+    if (shake) {
+      // The jolt of a blow: never further than its amplitude, fading out over its seconds.
+      shake.t += dt;
+      const left = 1 - shake.t / shake.seconds;
+      if (left <= 0) {
+        shake = null;
+      } else {
+        off.side += shake.amplitude * left * Math.sin(shake.t * 97) * 0.7;
+        off.up += shake.amplitude * left * Math.sin(shake.t * 131 + 1) * 0.7;
+      }
+    }
     const sin = Math.sin(at.yaw);
     const cos = Math.cos(at.yaw);
     eye.position.set(at.x - sin * off.forward + cos * off.side, EYE_HEIGHT + off.up, at.z - cos * off.forward - sin * off.side);
@@ -1968,20 +2285,47 @@ renderer.setAnimationLoop(() => {
     things?.update(stance.x, stance.z, time, dt);
     renderer.render(area.scene, eye);
   } else if ((inWorld() || inPanel()) && layout && area) {
+    // The monster of the area goes its round, and turns to the player who comes near.
+    const roams = inWorld() ? roaming() : null;
+    if (roams) {
+      if (!loading && !crossing && !travelling && !resting && !busy) {
+        const before = roams.w.noticed;
+        const passed = Math.min(Math.max(dt, 0), 0.1);
+        roams.w = wanderStep(roams.w, roams.slot, layout, roams.seed, roams.t, passed, player);
+        roams.t += passed;
+        if (roams.w.noticed && !before) actionSound('notice');
+      }
+      things?.setMonster(roams.w, dt);
+    }
+    let moved = 0;
     if (inWorld() && !menuOpen && !crossing && !loading && !busy && !heldStill()) {
       const step = walkStep(player, view.yaw, heldKeys(held), dt, walkLayout ?? layout);
+      moved = Math.hypot(step.pos.x - player.x, step.pos.z - player.z);
       player = step.pos;
       if (step.gate) {
         void crossGate(step.gate);
       } else {
         // A monster that is walked into starts the fight by itself.
         const hit = interactionNow();
-        if (hit?.auto && hit.id !== null) void engage(hit.id);
+        if (hit?.auto && hit.id !== null) {
+          actionSound('interact_monster');
+          void engage(hit.id);
+        }
       }
     }
-    showPrompt(promptNow());
+    // The stride: a footstep per STRIDE metres walked, and the bob of the eye with it.
+    const stride = gaitStep(gait, moved, dt);
+    gait = stride.gait;
+    if (stride.step && inWorld()) cue(stepSound(layout.type));
+    const offered = promptNow();
+    if (inWorld()) {
+      if (offered !== null && offered !== promptShown) actionSound('prompt');
+      promptShown = offered;
+    }
+    showPrompt(offered);
     things?.setQuestReady(readyCount(state?.quests ?? []) > 0);
-    eye.position.set(player.x, EYE_HEIGHT, player.z);
+    // No bob behind a panel: the view stands still there.
+    eye.position.set(player.x, EYE_HEIGHT + (inWorld() && panel === null ? bobOffset(gait) : 0), player.z);
     eye.rotation.set(view.pitch, view.yaw, 0);
     area.update(player.x, player.z, time);
     things?.update(player.x, player.z, time, dt);

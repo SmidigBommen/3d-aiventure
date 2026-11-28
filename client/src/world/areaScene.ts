@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SIGN_HEIGHT, footprint, type Dressing, type Placement } from './dressing';
-import { INWARD, boundaryBlocks, type AreaLayout, type Gate, type Side } from './layout';
+import { GLOW_COLOURS, GLOW_MODELS, MAX_GLOWS, MAX_PARTICLES, flicker, glowPulse, type Air, type Drift } from './atmosphere';
+import { INWARD, boundaryBlocks, generator, hash, type AreaLayout, type Gate, type Side } from './layout';
 import type { Model } from './modelLoader';
 
 // Draws an area from its dressing: every placement where the dressing put it, the light, fog and
@@ -17,6 +18,16 @@ const BACKING = 1.2; // m, thickness of the plain wall behind a dungeon's wall m
 const MAX_FLAMES = 6;
 const ROAD_WIDTH = 3.6; // m, the dirt road of an ambush
 const ROAD_COLOUR = '#7a6344';
+// Every light is paid for by each pixel of the area: with two, the town square of Rivermeet lost a frame slot
+// in the smoke test's software renderer (66.7 ms against 50.1 ms; execution/frames.mjs). One keeps the budget.
+const MAX_GLOW_LIGHTS = Math.min(MAX_GLOWS, 1);
+const GLOW_STRENGTH = 7; // a glow's light at the top of its pulse
+const GLOW_EMISSIVE = 0.55; // how strongly a glowing model shines in its colour, at the top of its pulse
+// How each kind of drift moves: metres per second it sinks (negative: rises), metres per second it is blown sideways, metres it sways.
+const DRIFT_MOTION: Record<Drift, [number, number, number]> = {
+  dust: [0.12, 0.05, 0.3], ash: [0.3, 0.1, 0.35], leaves: [0.55, 0.9, 0.6], embers: [-0.7, 0.15, 0.3], motes: [0, 0, 0.4],
+};
+const DRIFT_SIZE: Record<Drift, number> = { dust: 0.05, ash: 0.07, leaves: 0.11, embers: 0.07, motes: 0.08 };
 
 // Models that burn: each gets a flickering light, the first MAX_FLAMES of an area at least.
 // `flame` adds a flame for a model that has none of its own.
@@ -146,6 +157,7 @@ function placementMatrix(p: Placement, box: THREE.Box3): THREE.Matrix4 {
 export function buildAreaScene(
   dressing: Dressing, exits: { id: string; name: string }[], models: Map<string, Model | null>,
   road: { from: { x: number; z: number }; to: { x: number; z: number } } | null = null,
+  air: Air | null = null,
 ): AreaScene {
   const scene = new THREE.Scene();
   const { layout, mood, placements } = dressing;
@@ -235,6 +247,11 @@ export function buildAreaScene(
     }
   }
 
+  // --- what glows here (atmosphere.ts): the models of the location's glow kind ---
+  const glowing = air?.glow ? GLOW_MODELS[air.glow] : [];
+  const glowColour = air?.glow ? GLOW_COLOURS[air.glow] : '#000000';
+  const glowMaterials: { material: THREE.MeshStandardMaterial; seed: number }[] = [];
+
   // --- the models: one instanced mesh per model part and tint ---
   const groups = new Map<string, Placement[]>();
   for (const p of placements) {
@@ -253,10 +270,16 @@ export function buildAreaScene(
       }
       continue;
     }
+    const lit = glowing.includes(key);
     const tinted = (m: THREE.Material): THREE.Material => {
-      if (!tint) return m;
+      if (!tint && !lit) return m;
       const copy = own(m.clone()) as THREE.MeshStandardMaterial;
-      copy.color?.multiply(new THREE.Color(tint));
+      if (tint) copy.color?.multiply(new THREE.Color(tint));
+      if (lit && copy.emissive) {
+        // A model that glows: its own copy of the material, pulsing in the colour of the glow.
+        copy.emissive.set(glowColour);
+        glowMaterials.push({ material: copy, seed: glowMaterials.length });
+      }
       return copy;
     };
     const matrices = group.map((p) => placementMatrix(p, model.box));
@@ -284,7 +307,7 @@ export function buildAreaScene(
   // --- fire ---
   const flames: THREE.PointLight[] = [];
   const burning = placements.filter((p) => BURNING[p.model]).sort((a, b) => BURNING[b.model].strength - BURNING[a.model].strength);
-  burning.slice(0, MAX_FLAMES).forEach((p, i) => {
+  burning.slice(0, MAX_FLAMES).forEach((p) => {
     const fire = BURNING[p.model];
     const height = footprint(p.model, p.scale, p.rotation).height;
     if (fire.flame) {
@@ -294,17 +317,73 @@ export function buildAreaScene(
     }
     const flame = new THREE.PointLight(fire.colour, fire.strength, 18, 1.8);
     flame.position.set(p.x, p.y + height + 0.4, p.z);
-    flame.userData.phase = i * 1.7;
     flame.userData.strength = fire.strength;
     scene.add(flame);
     flames.push(flame);
   });
 
+  // --- glow: a light at the glowing models nearest to where one arrives, MAX_GLOW_LIGHTS at most ---
+  const glowLights: THREE.PointLight[] = [];
+  placements
+    .filter((p) => glowing.includes(p.model))
+    .sort((a, b) => Math.hypot(a.x - layout.spawn.x, a.z - layout.spawn.z) - Math.hypot(b.x - layout.spawn.x, b.z - layout.spawn.z))
+    .slice(0, MAX_GLOW_LIGHTS)
+    .forEach((p, i) => {
+      const height = footprint(p.model, p.scale, p.rotation).height;
+      const glow = new THREE.PointLight(glowColour, GLOW_STRENGTH, 9, 1.8);
+      glow.position.set(p.x, p.y + Math.min(height, 2.4) * 0.6 + 0.3, p.z);
+      glow.userData.seed = 100 + i;
+      scene.add(glow);
+      glowLights.push(glow);
+    });
+
+  // --- what drifts in the air: one cloud of points in a box that stays around the player ---
+  let drift: { points: THREE.Points; base: Float32Array; positions: THREE.BufferAttribute; kind: Drift } | null = null;
+  const driftBox = { x: 26, y: layout.ceiling === null ? 7 : layout.ceiling, z: 26 };
+  if (air && air.count > 0) {
+    const count = Math.min(air.count, MAX_PARTICLES);
+    const rnd = generator(hash(`air/${air.drift}/${halfX}/${halfZ}`)); // the same cloud every time for the same area
+    const base = new Float32Array(count * 4); // where each point starts in the box, and a number of its own
+    for (let i = 0; i < base.length; i++) base[i] = rnd();
+    const geometry = own(new THREE.BufferGeometry());
+    const positions = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+    geometry.setAttribute('position', positions);
+    const material = own(new THREE.PointsMaterial({
+      color: air.colour, size: DRIFT_SIZE[air.drift], sizeAttenuation: true, transparent: true, opacity: 0.75, depthWrite: false,
+      blending: air.drift === 'embers' || air.drift === 'motes' ? THREE.AdditiveBlending : THREE.NormalBlending,
+    }));
+    const points = new THREE.Points(geometry, material);
+    points.frustumCulled = false;
+    scene.add(points);
+    drift = { points, base, positions, kind: air.drift };
+  }
+  const wrap = (value: number, size: number): number => value - Math.floor(value / size) * size;
+
   return {
     scene,
     update(x, z, time) {
       if (torch) torch.position.set(x, 2, z);
-      for (const flame of flames) flame.intensity = flame.userData.strength * (1 + Math.sin(time * 9 + flame.userData.phase) * 0.15);
+      flames.forEach((flame, i) => {
+        flame.intensity = flame.userData.strength * flicker(time, i);
+      });
+      for (const { material: glow, seed } of glowMaterials) glow.emissiveIntensity = GLOW_EMISSIVE * glowPulse(time, seed);
+      for (const glow of glowLights) glow.intensity = GLOW_STRENGTH * glowPulse(time, glow.userData.seed);
+      if (drift) {
+        const { base, positions, kind } = drift;
+        const [fall, wind, sway] = DRIFT_MOTION[kind];
+        for (let i = 0; i < positions.count; i++) {
+          const self = base[i * 4 + 3];
+          const turn = time * (0.4 + self) + self * 40;
+          // Each point moves through the box on its own line and comes in again on the far side; the box follows the player.
+          const px = wrap(base[i * 4] * driftBox.x + wind * time * (0.6 + 0.8 * self) + Math.sin(turn) * sway - x, driftBox.x) + x - driftBox.x / 2;
+          const pz = wrap(base[i * 4 + 2] * driftBox.z + Math.cos(turn * 0.8) * sway - z, driftBox.z) + z - driftBox.z / 2;
+          const py = kind === 'motes'
+            ? 0.3 + base[i * 4 + 1] * (driftBox.y - 0.6) + Math.sin(turn) * 0.25
+            : wrap(base[i * 4 + 1] * driftBox.y - fall * time * (0.6 + 0.8 * self), driftBox.y);
+          positions.setXYZ(i, px, py, pz);
+        }
+        positions.needsUpdate = true;
+      }
     },
     dispose() {
       for (const thing of new Set(owned)) thing.dispose();

@@ -1,6 +1,8 @@
 // What each effect key of a turn event looks like: a colour and the shape its particles move in.
 // The renderer draws them; nothing here renders. Pure.
 
+import type { FloatStyle } from './timeline';
+
 export type FxPattern =
   | 'slash' | 'spikes' | 'thud' | 'flame' | 'shards' | 'bolt' | 'drip' | 'burst' | 'ring' | 'implode' | 'spiral' | 'wave' | 'rise' | 'fall' | 'dome'
   | 'orbit';
@@ -38,6 +40,14 @@ export const FX_LOOKS: Record<string, FxLook> = {
 export function fxLook(key: string): FxLook {
   return Object.prototype.hasOwnProperty.call(FX_LOOKS, key) ? FX_LOOKS[key] : FX_LOOKS.impact;
 }
+
+/** How a floating text looks, by its style: colour and size in rem. */
+export const FLOAT_LOOKS: Record<FloatStyle, { color: string; size: number }> = {
+  damage: { color: '#ff5a4f', size: 1.7 },
+  crit: { color: '#ffd35a', size: 2.6 },
+  heal: { color: '#5fe08a', size: 2.0 },
+  miss: { color: '#a9a6b3', size: 1.3 },
+};
 
 /** Where on the screen an effect on the player shows, by its shape. */
 export type FlashPlace = 'edge' | 'top' | 'bottom' | 'streak';
