@@ -26,10 +26,10 @@ export interface AreaContents {
   search_spot: boolean;
 }
 
-export type InteractionKind = 'monster' | 'event' | 'boss' | 'search' | 'rest' | 'shop';
+export type InteractionKind = 'monster' | 'event' | 'boss' | 'search' | 'rest' | 'shop' | 'travel';
 export interface Interaction {
   kind: InteractionKind;
-  id: string | null; // the content id to engage; null for 'search', 'rest' and 'shop'
+  id: string | null; // the content id to engage; null for 'search', 'rest', 'shop' and 'travel'
   prompt: string;
   auto: boolean; // true: start without a key press
   locked: boolean; // true: E does nothing
@@ -63,7 +63,7 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   if (!contents || !slots) return null;
   const { monster, event, boss } = contents;
   const distance = (slot: Vec2): number => Math.hypot(slot.x - pos.x, slot.z - pos.z);
-  // In the order that decides a tie: monster, event, boss, search, rest, shop.
+  // In the order that decides a tie: monster, event, boss, search, rest, shop, travel.
   const candidates: [number, Interaction][] = [];
   if (monster) {
     const d = distance(slots.monster);
@@ -96,6 +96,11 @@ export function interactionAt(pos: Vec2, layout: AreaLayout, contents: AreaConte
   const shop = slots.shop ?? null;
   if (shop) {
     candidates.push([distance(shop), { kind: 'shop', id: null, prompt: 'E: talk to Elara', auto: false, locked: false, x: shop.x, z: shop.z }]);
+  }
+  // The signpost. A slots object of before this field existed has no travel.
+  const travel = slots.travel ?? null;
+  if (travel) {
+    candidates.push([distance(travel), { kind: 'travel', id: null, prompt: 'E: travel', auto: false, locked: false, x: travel.x, z: travel.z }]);
   }
   let best: [number, Interaction] | null = null;
   for (const candidate of candidates) {

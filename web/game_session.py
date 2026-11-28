@@ -260,7 +260,7 @@ def get_all_armors_flat() -> dict:
 # Number of battle log lines kept in the session and shown in the arena
 BATTLE_LOG_LIMIT = 16
 # Where in an area the monster of a fight can stand
-BATTLE_PLACES = ("monster", "event", "landmark", "boss")
+BATTLE_PLACES = ("monster", "event", "landmark", "boss", "road")
 
 # Healing by potion name, for saves written before potions stored healing_amount
 LEGACY_POTION_HEALING = {

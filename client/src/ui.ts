@@ -69,6 +69,22 @@ export function showHud(state: WorldState, entered: boolean): void {
   }
 }
 
+/** The heads-up display away: the ending has the screen to itself. */
+export function hideHud(): void {
+  show(el('title-screen'), false);
+  show(el('hud'), false);
+  show(el('menu'), false);
+}
+
+/** On the road of an ambush the place box names the road, not the destination the server already holds. */
+export function showRoadHud(): void {
+  el('hud-location').textContent = 'The Road';
+  el('hud-area').textContent = 'Ambush';
+  el('hud-danger').textContent = '';
+  el('hud-danger').className = 'danger';
+  el('hud-description').classList.add('faded');
+}
+
 /** The title panel away, while the first area loads. */
 export function hideTitle(): void {
   show(el('title-screen'), false);

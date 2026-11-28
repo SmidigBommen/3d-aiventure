@@ -5,7 +5,8 @@ import type { Model } from './modelLoader';
 
 // Draws an area from its dressing: every placement where the dressing put it, the light, fog and
 // sky from the mood. Nothing here decides which model goes where, and nothing is random. Besides
-// the models there is only plain geometry: the floor plane, what backs the boundary, the signs.
+// the models there is only plain geometry: the floor plane, what backs the boundary, the signs,
+// and the dirt road of the ambush scene.
 
 const GOLD = '#d4a94a';
 const INK = '#e8dcc4';
@@ -14,6 +15,8 @@ const FALLBACK = '#6a6672'; // a model that failed to load is a box of this colo
 const SIGN_OVERHANG = 0.5; // m the sign reaches past the opening on each side
 const BACKING = 1.2; // m, thickness of the plain wall behind a dungeon's wall models
 const MAX_FLAMES = 6;
+const ROAD_WIDTH = 3.6; // m, the dirt road of an ambush
+const ROAD_COLOUR = '#7a6344';
 
 // Models that burn: each gets a flickering light, the first MAX_FLAMES of an area at least.
 // `flame` adds a flame for a model that has none of its own.
@@ -139,7 +142,11 @@ function placementMatrix(p: Placement, box: THREE.Box3): THREE.Matrix4 {
   return place.multiply(toOrigin);
 }
 
-export function buildAreaScene(dressing: Dressing, exits: { id: string; name: string }[], models: Map<string, Model | null>): AreaScene {
+/** `road`: the scene is the road of an ambush, and a strip of dirt runs across the floor through these two points. */
+export function buildAreaScene(
+  dressing: Dressing, exits: { id: string; name: string }[], models: Map<string, Model | null>,
+  road: { from: { x: number; z: number }; to: { x: number; z: number } } | null = null,
+): AreaScene {
   const scene = new THREE.Scene();
   const { layout, mood, placements } = dressing;
   const { halfX, halfZ } = layout.floor;
@@ -208,6 +215,14 @@ export function buildAreaScene(dressing: Dressing, exits: { id: string; name: st
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(halfX * 2, halfZ * 2), material(ground));
   floor.rotation.x = -Math.PI / 2;
   add(floor);
+  if (road) {
+    // The only scene with a road of its own: dirt from one edge of the world to the other, over the ground cover.
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(ROAD_WIDTH, 240), material(new THREE.Color(ROAD_COLOUR).lerp(ground, 0.25)));
+    strip.rotation.order = 'YXZ';
+    strip.rotation.set(-Math.PI / 2, Math.atan2(road.to.x - road.from.x, road.to.z - road.from.z), 0);
+    strip.position.set((road.from.x + road.to.x) / 2, 0.09, (road.from.z + road.to.z) / 2);
+    add(strip);
+  }
   if (layout.ceiling !== null) {
     // Behind the wall models, so that a broken or barred piece does not show the void.
     const backing = material(fog.clone().multiplyScalar(0.5));

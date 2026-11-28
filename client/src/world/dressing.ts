@@ -14,9 +14,13 @@ export interface DressSpec extends AreaSpec {
   rest: boolean; // the player can rest here
   boss: boolean; // the campaign places a boss here (defeated or not)
   special: string | null; // the area's `special`, or null
+  travel?: boolean; // travel arrives here: the area has the signpost (missing counts as false)
 }
 export type PlacementRole = 'ground' | 'boundary' | 'gate' | 'prop' | 'landmark';
-export type LandmarkKind = 'shop' | 'rest' | 'boss' | 'special';
+export type LandmarkKind = 'shop' | 'rest' | 'boss' | 'special' | 'travel';
+
+/** The stretch of road Lady Vex's ambush is fought on: no gates, nothing but the wilderness. */
+export const ROAD_SPEC: DressSpec = { location: 'The Road', type: 'wilderness', id: 'ambush', exits: [], shop: false, rest: false, boss: false, special: null, travel: false };
 export interface Placement {
   model: string; // a key of models.json
   role: PlacementRole;
@@ -127,6 +131,7 @@ interface Item {
 const SHOP: Item = { model: 'env/town/market_stand', height: 2.6, solid: 0.95 };
 const INN: Item = { model: 'env/town/tavern', height: 6.2, solid: 1, wall: true };
 const CAMPFIRE: Item = { model: 'env/wilderness/campfire', height: 0.42, solid: 0.6, turn: 'any' };
+const SIGNPOST: Item = { model: 'env/town/signpost', height: 2.6, solid: 1, turn: 'any' };
 const SPECIALS: Record<string, Item> = {
   town_center: { model: SPECIAL_LANDMARKS.town_center, height: 3, solid: 0.9 },
   water_access: { model: SPECIAL_LANDMARKS.water_access, height: 0.15, stretch: [1.45, 1, 1] },
@@ -648,6 +653,7 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   if (area.shop) place(SHOP, 'shop', true, 0.8);
   const special = area.special !== null && Object.prototype.hasOwnProperty.call(SPECIALS, area.special) ? SPECIALS[area.special] : null;
   if (special) place(special, 'special', true, 0.7);
+  if (area.travel === true) place(SIGNPOST, 'travel', true, 0.7);
 
   // --- props: one of each of the first six kinds, then whatever the generator picks ---
 
@@ -812,6 +818,9 @@ export function dressArea(layout: AreaLayout, area: DressSpec): Dressing {
   // After the special landmark's point, which it keeps off like the other slots.
   const resting = standing.find((c) => c.placement.landmark === 'rest') ?? null;
   if (resting) slots.rest = landmarkPoint({ halfX, halfZ }, solids, layout.spawn, layout.gates, resting.placement.solid ?? { ...resting.rect, height: 0 }, slots);
+  // After both, which it keeps off too.
+  const signpost = standing.find((c) => c.placement.landmark === 'travel') ?? null;
+  if (signpost) slots.travel = landmarkPoint({ halfX, halfZ }, solids, layout.spawn, layout.gates, signpost.placement.solid ?? { ...signpost.rect, height: 0 }, slots);
   // Elara stands inside her stall, behind its table: no obstacle is added and no path changes.
   const stall = placements.find((p) => p.landmark === 'shop') ?? null;
   if (stall) slots.shop = keeperPoint(stall, layout.spawn);
@@ -956,14 +965,14 @@ function chooseSlots(
       for (const event of events.slice(0, 40)) {
         if (!apart(event, [monster], spacing)) continue;
         const search = searches.find((p) => apart(p, [monster, event], spacing));
-        if (search) return { monster, event, search, boss, landmark: null, rest: null, shop: null };
+        if (search) return { monster, event, search, boss, landmark: null, rest: null, shop: null, travel: null };
       }
     }
   }
   // No room at all (a floor smaller than any the game builds): everything beside the spawn.
   return {
     monster: { x: spawn.x + 1, z: spawn.z }, event: { x: spawn.x - 1, z: spawn.z }, search: { x: spawn.x, z: spawn.z + 1 },
-    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null, rest: null, shop: null,
+    boss: arena ? { x: spawn.x, z: spawn.z - 1 } : null, landmark: null, rest: null, shop: null, travel: null,
   };
 }
 
@@ -994,7 +1003,7 @@ const LANDMARK_ZONE_GAP = 2.25; // m from that point to a trigger zone (the rule
 const LANDMARK_SPAWN_GAP = 1.75; // m from it to a spawn point (the rule is 1.5)
 
 /**
- * Where one stands at the special or the rest landmark `box` (its solid, or its footprint when nothing of it blocks): a
+ * Where one stands at the special landmark, the rest landmark or the signpost `box` (its solid, or its footprint when nothing of it blocks): a
  * free point beside it that can be walked to, on the side the default spawn is on, clear of the gates'
  * trigger zones and the spawn points. It keeps off what stands on the other slots where there is room.
  */
@@ -1003,7 +1012,7 @@ function landmarkPoint(floor: { halfX: number; halfZ: number }, solids: Box[], s
   const zones = gates.map((g) => ({ ...triggerRect(g), height: 0 }));
   const blocking = slots.boss ? [...solids, { x: slots.boss.x, z: slots.boss.z, halfX: BOSS_HALF, halfZ: BOSS_HALF, height: 2 }] : solids;
   const reached = reachable(floor, blocking, spawn);
-  const others = [slots.monster, slots.event, slots.search, ...(slots.boss ? [slots.boss] : []), ...(slots.landmark ? [slots.landmark] : [])];
+  const others = [slots.monster, slots.event, slots.search, ...(slots.boss ? [slots.boss] : []), ...(slots.landmark ? [slots.landmark] : []), ...(slots.rest ? [slots.rest] : [])];
   const points: Vec2[] = [];
   const span = Math.ceil((Math.max(box.halfX, box.halfZ) + 2) / FILL_GRID);
   // On the cells of the reachability check, so that `reached` speaks about the point itself.
@@ -1037,7 +1046,7 @@ function snapAngle(angle: number): number {
 /** What to dress an area with, from the answer of the server. */
 export function dressSpecOf(state: {
   location: { name: string; type: string };
-  area: { id: string; has_shop: boolean; can_rest: boolean; is_boss_area: boolean; special: string | null };
+  area: { id: string; has_shop: boolean; can_rest: boolean; is_boss_area: boolean; special: string | null; is_start?: boolean };
   exits: { id: string }[];
 }): DressSpec {
   return {
@@ -1049,5 +1058,6 @@ export function dressSpecOf(state: {
     rest: state.area.can_rest,
     boss: state.area.is_boss_area,
     special: state.area.special,
+    travel: state.area.is_start === true,
   };
 }

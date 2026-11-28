@@ -11,6 +11,10 @@
 // In both modes it talks to Elara in the market and looks at the three tabs of her shop; with --serve it
 // also haggles (a success and a failure), buys, sells, and takes a quest from accepted to turned in.
 // The d20 of those events is fixed through execution/smoke_server.py, which it starts the server with.
+// In both modes it travels from the signpost of Rivermeet to the Whispering Woods (the map, a locked act, the
+// fade, the arrival title), reads the compass and opens the journal. With --serve it also travels into Act 2,
+// is ambushed by Lady Vex on the road and wins, reads the journal with three shards, and fells Malachar to see
+// the ending, once after the fight and once from the journal.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
 // failed request, HTTP status >= 400, a 3D view that renders nothing, a model that did not load,
@@ -430,6 +434,103 @@ async function chooseWith(d20, name) {
   }));
 }
 
+/** In the page: a POST with a JSON body, answered with the status and the body. */
+async function postJson(path, body) {
+  return page.evaluate(async ([p, b]) => {
+    const r = await fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+    return { status: r.status, body: await r.json() };
+  }, [path, body]);
+}
+
+/** Walks to the signpost, looks at it and presses E: the map panel is open, the mouse free. */
+async function openMap(name) {
+  await walkTo('travel', 0.4);
+  await page.evaluate(() => {
+    const post = window.__aiv.dressing.placements.find((p) => p.landmark === 'travel');
+    window.__aiv.lookAt(post.x, post.z);
+  });
+  await page.waitForTimeout(100);
+  if (name) await promptShot('E: travel', name);
+  await page.keyboard.press('KeyE');
+  await page.waitForFunction(() => window.__aiv.panel === 'travel' && window.__aiv.travel !== null && !document.getElementById('travel-panel').hidden, null, { timeout: 10000 });
+}
+
+/** After a choice on the map: the journey is over, the area of `locationName` is entered and its name is on screen. */
+async function arrived(locationName, areaId, act, name) {
+  await page.waitForFunction(() => window.__aiv.arrival !== null && window.__aiv.screen === 'world' && window.__aiv.loading === false && window.__aiv.layout !== null, null, { timeout: 60000 });
+  const seen = await page.evaluate(() => ({
+    arrival: window.__aiv.arrival, location: window.__aiv.state.location, area: window.__aiv.state.area, pending: window.__aiv.state.pending, road: window.__aiv.road,
+    shown: !document.getElementById('arrival').hidden, title: document.getElementById('arrival-title').textContent, subtitle: document.getElementById('arrival-subtitle').textContent,
+    player: window.__aiv.player, spawn: window.__aiv.layout.spawn, panel: window.__aiv.panel, path: window.location.pathname,
+  }));
+  const subtitle = `Act ${act}: ${campaign.acts[act - 1].title}`;
+  if (seen.location.name !== locationName || seen.area.id !== areaId || !seen.area.is_start || seen.pending !== null || seen.road) {
+    errors.push(`${name}: arrived in ${seen.location.name}/${seen.area.id}, pending ${JSON.stringify(seen.pending)}, road ${seen.road}`);
+  }
+  if (seen.arrival.title !== locationName || seen.arrival.subtitle !== subtitle || !seen.shown || seen.title !== locationName || seen.subtitle !== subtitle) {
+    errors.push(`${name}: the arrival shows ${JSON.stringify([seen.arrival, seen.shown, seen.title, seen.subtitle])}`);
+  }
+  if (Math.hypot(seen.player.x - seen.spawn.x, seen.player.z - seen.spawn.z) > 0.05) errors.push(`${name}: arrived at ${JSON.stringify(seen.player)}, not at the default spawn`);
+  if (seen.panel !== null || seen.path !== '/') errors.push(`${name}: panel ${seen.panel}, path ${seen.path}`);
+  // The view is back and the title stands.
+  await page.waitForFunction(() => Number(getComputedStyle(document.getElementById('veil')).opacity) <= 0.05, null, { timeout: 15000 }).catch(() => {});
+  await shot(name);
+  await page.waitForFunction(() => window.__aiv.arrival === null && window.__aiv.travelling === false && document.getElementById('arrival').hidden, null, { timeout: 10000 })
+    .catch(() => errors.push(`${name}: the arrival title does not go away`));
+}
+
+/** Opens the journal with J and returns what its crown shows. */
+async function openJournal() {
+  await page.keyboard.press('KeyJ');
+  await page.waitForFunction(() => window.__aiv.panel === 'journal' && window.__aiv.journal !== null && !document.getElementById('journal-panel').hidden, null, { timeout: 10000 });
+  return page.evaluate(() => ({
+    sockets: [...document.querySelectorAll('#journal-crown .shard-socket')].map((node) => ({
+      found: node.classList.contains('found'), label: node.querySelector('.shard-label').textContent, colour: node.querySelector('.shard-gem').style.background,
+    })),
+    view: window.__aiv.journal,
+    acts: [...document.querySelectorAll('#journal-acts .journal-act')].map((node) => node.textContent),
+    deeds: [...document.querySelectorAll('#journal-deeds .journal-deed')].map((node) => node.textContent),
+    complete: !document.getElementById('journal-complete').hidden, locked: document.pointerLockElement !== null,
+  }));
+}
+
+/** Walks through the epilogue with the keys given (or a click for 'click') and checks every step against the view. */
+async function throughEnding(name, shotNames) {
+  await page.waitForFunction(() => window.__aiv.screen === 'ending' && window.__aiv.ending !== null && !document.getElementById('ending-panel').hidden, null, { timeout: 30000 });
+  const view = await page.evaluate(() => window.__aiv.ending.view);
+  const texts = [view.title, ...view.paragraphs, 'Your Legend'];
+  if (view.paragraphs.length !== 3 || !view.paragraphs[1].includes('Smoke, a Human Fighter out of Rivermeet')) errors.push(`${name}: the paragraphs are ${JSON.stringify(view.paragraphs).slice(0, 300)}`);
+  const keys = ['Enter', 'Space', 'KeyE', 'click', 'Enter'];
+  for (let step = 0; step < texts.length; step++) {
+    await page.waitForFunction((n) => window.__aiv.ending?.step === n, step, { timeout: 5000 }).catch(() => errors.push(`${name}: step ${step} is not reached`));
+    const seen = await page.evaluate(() => ({
+      text: document.getElementById('ending-panel').textContent, button: document.getElementById('ending-continue').textContent,
+      rows: [...document.querySelectorAll('#ending-legend .reward-row')].map((row) => [row.querySelector('.label').textContent, row.querySelector('.value').textContent]),
+      hud: !document.getElementById('hud').hidden, title: !document.getElementById('title-screen').hidden,
+    }));
+    if (!seen.text.includes(texts[step])) errors.push(`${name}: step ${step} shows "${seen.text.slice(0, 200)}"`);
+    if (seen.button !== (step === texts.length - 1 ? 'Return to the title screen' : 'Continue')) errors.push(`${name}: the button of step ${step} reads "${seen.button}"`);
+    if (seen.hud || seen.title) errors.push(`${name}: the HUD or the title screen shows during the ending`);
+    if (step === texts.length - 1) {
+      const wanted = [['Level reached', view.character.level], ['Monsters slain', view.stats.kills], ['Bosses felled', view.stats.bosses],
+        ['Events braved', view.stats.events], ['Quests completed', view.stats.quests], ['Gold in purse', view.character.gold]].map(([label, value]) => [label, String(value)]);
+      if (JSON.stringify(seen.rows) !== JSON.stringify(wanted)) errors.push(`${name}: the legend shows ${JSON.stringify(seen.rows)}`);
+    }
+    if (shotNames[step]) {
+      await page.waitForTimeout(400);
+      const variety = await canvasVariety();
+      if (variety < 0.05) errors.push(`${shotNames[step]}: the view behind the ending is blank`);
+      await shot(shotNames[step]);
+    }
+    if (keys[step] === 'click') await page.click('#ending-continue');
+    else await page.keyboard.press(keys[step]);
+  }
+  await page.waitForFunction(() => window.__aiv.screen === 'title' && window.__aiv.ending === null && document.getElementById('ending-panel').hidden, null, { timeout: 10000 });
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
+  const after = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
+  if (!after.has_character || after.character.name !== 'Smoke' || after.pending !== null) errors.push(`${name}: after the ending the state is ${JSON.stringify(after).slice(0, 200)}`);
+}
+
 try {
   // 1. The 3D client loads and draws; without a character it offers a new game.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
@@ -461,6 +562,157 @@ try {
   const start = await enterWorld();
   if (start.area.id !== 'town_square') errors.push(`a new character starts in ${start.area.id}, not in town_square`);
   await worldShot('loc-rivermeet-town');
+
+  // 5a. The signpost of the town square: the prompt, the map of the realm, a locked act.
+  await openMap('signpost');
+  const map = await page.evaluate(() => ({
+    title: document.querySelector('#travel-panel h2').textContent,
+    acts: [...document.querySelectorAll('#travel-acts .travel-act h3')].map((node) => node.textContent),
+    cards: [...document.querySelectorAll('#travel-acts button[data-location]')].map((card) => ({
+      location: card.dataset.location, hotkey: card.dataset.hotkey, off: card.classList.contains('unavailable'), text: card.textContent,
+    })),
+    reasons: [...document.querySelectorAll('#travel-acts .travel-reason')].map((node) => node.textContent),
+    view: window.__aiv.travel, locked: document.pointerLockElement !== null, prompt: window.__aiv.prompt,
+  }));
+  const everywhere = campaign.acts.flatMap((act) => act.locations.map((loc) => loc.name));
+  if (map.title !== 'The Realm of Eldoria') errors.push(`travel-panel: the title is "${map.title}"`);
+  if (JSON.stringify(map.acts) !== JSON.stringify(campaign.acts.map((act) => `Act ${act.number}: ${act.title}`))) errors.push(`travel-panel: the acts are ${JSON.stringify(map.acts)}`);
+  if (JSON.stringify(map.cards.map((card) => card.location)) !== JSON.stringify(everywhere) || map.cards.map((card) => card.hotkey).join('') !== '12345678') {
+    errors.push(`travel-panel: the locations are ${JSON.stringify(map.cards.map((card) => [card.hotkey, card.location]))}`);
+  }
+  if (!map.cards[0].off || !map.cards[0].text.includes('You are here.') || map.view.current !== 'Rivermeet Town') errors.push(`travel-panel: the current location: ${JSON.stringify(map.cards[0])}`);
+  if (map.cards[1].off || !map.cards[1].text.includes('Level 2-4') || !map.cards[1].text.includes('Boss')) errors.push(`travel-panel: the Whispering Woods: ${JSON.stringify(map.cards[1])}`);
+  if (map.locked || map.prompt !== null) errors.push(`travel-panel: pointer locked ${map.locked}, prompt ${JSON.stringify(map.prompt)}`);
+  // Nobody walks, and E, I, C, J and M do nothing while the map is open.
+  const atPost = await page.evaluate(() => window.__aiv.player);
+  await page.keyboard.down('KeyW');
+  for (const key of ['KeyE', 'KeyI', 'KeyC', 'KeyJ', 'KeyM']) await page.keyboard.press(key);
+  await page.waitForTimeout(300);
+  await page.keyboard.up('KeyW');
+  const mapStill = await page.evaluate(() => ({ player: window.__aiv.player, panel: window.__aiv.panel, menu: window.__aiv.menuOpen }));
+  if (mapStill.panel !== 'travel' || mapStill.menu || mapStill.player.x !== atPost.x || mapStill.player.z !== atPost.z) errors.push(`travel-panel: ${JSON.stringify(mapStill)}`);
+  await shot('travel-panel');
+
+  // A fresh campaign has Act 2 locked: the key says why, and the server refuses the journey.
+  const fresh = map.view.acts[1].locked;
+  if (fresh) {
+    const reason = 'Defeat the guardians of Act 1 to open the way.';
+    if (map.reasons[0] !== reason || !map.cards[3].off) errors.push(`travel-locked: the reasons are ${JSON.stringify(map.reasons)}`);
+    await page.keyboard.press('Digit4');
+    await page.waitForFunction((r) => document.querySelector('#travel-panel .panel-message')?.textContent === r, reason, { timeout: 5000 })
+      .catch(() => errors.push('travel-locked: the panel does not say why the act is locked'));
+    const refused = await postJson('/api/travel', { location: 'Emberforge Mountains' });
+    if (refused.status !== 409 || refused.body.error !== 'act_locked' || refused.body.message !== reason) errors.push(`travel-locked: the server answered ${JSON.stringify(refused)}`);
+    // That refusal is the 409 this step asks for: its status line and console message are taken out of the report.
+    for (const line of errors.filter((made) => made.includes('/api/travel'))) errors.splice(errors.indexOf(line), 1);
+    if (await page.evaluate(() => window.__aiv.panel !== 'travel' || window.__aiv.travelling || window.__aiv.state.location.name !== 'Rivermeet Town')) errors.push('travel-locked: the locked location was travelled to');
+    await shot('travel-locked');
+  } else {
+    console.log('skipped (this campaign has Act 2 open): travel-locked');
+  }
+  await page.keyboard.press('Digit1');
+  await page.waitForFunction(() => document.querySelector('#travel-panel .panel-message')?.textContent === 'You are here.', null, { timeout: 5000 })
+    .catch(() => errors.push('travel-panel: the current location does not say "You are here."'));
+  // Esc closes; E opens it again.
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__aiv.panel === null && document.getElementById('travel-panel').hidden, null, { timeout: 5000 });
+  if (await page.evaluate(() => window.__aiv.menuOpen)) errors.push('travel-panel: Esc opened the menu');
+  await page.keyboard.press('KeyE');
+  await page.waitForFunction(() => window.__aiv.panel === 'travel', null, { timeout: 10000 });
+
+  // 5b. The journey to the Whispering Woods: the view goes black while the answer is held back, then the arrival.
+  {
+    let wake;
+    const asleep = new Promise((done) => (wake = done));
+    await page.route('**/api/travel', async (route) => {
+      if (route.request().method() === 'POST') await asleep;
+      await route.continue();
+    });
+    await page.keyboard.press('Digit2');
+    await page.waitForFunction(() => window.__aiv.travelling === true, null, { timeout: 5000 });
+    await page.waitForFunction(() => Number(getComputedStyle(document.getElementById('veil')).opacity) > 0.99, null, { timeout: 15000 })
+      .catch(() => errors.push('travel-fade: the view did not go black'));
+    await page.keyboard.down('KeyW');
+    for (const key of ['KeyE', 'KeyI', 'KeyJ', 'KeyM']) await page.keyboard.press(key);
+    const dark = await page.evaluate(() => ({ travelling: window.__aiv.travelling, panel: window.__aiv.panel, menu: window.__aiv.menuOpen, prompt: window.__aiv.prompt, location: window.__aiv.state.location.name }));
+    if (!dark.travelling || dark.panel !== null || dark.menu || dark.prompt !== null || dark.location !== 'Rivermeet Town') errors.push(`travel-fade: ${JSON.stringify(dark)}`);
+    await shot('travel-fade');
+    await page.keyboard.up('KeyW');
+    wake();
+    await arrived('Whispering Woods', 'entrance', 1, 'arrival-act1');
+    await page.unroute('**/api/travel');
+  }
+
+  // 5c. The compass: a mark per gate with the name of the area behind it, and the signpost.
+  {
+    const seen = await page.evaluate(() => ({
+      marks: window.__aiv.compass, exits: window.__aiv.state.exits, gates: window.__aiv.layout.gates.map((g) => g.exitId), player: window.__aiv.player,
+      labels: [...document.querySelectorAll('#hud-compass .compass-label')].map((node) => [node.dataset.kind, node.textContent]),
+      shown: !document.getElementById('hud-compass').hidden,
+    }));
+    const names = seen.gates.map((id) => seen.exits.find((exit) => exit.id === id)?.name);
+    const gateMarks = (seen.marks ?? []).filter((mark) => mark.kind === 'gate');
+    if (!seen.shown || seen.marks === null) errors.push('compass: it does not show in the world');
+    else {
+      if (JSON.stringify(gateMarks.map((mark) => mark.label)) !== JSON.stringify(names) || names.length !== seen.exits.length) errors.push(`compass: the gates are ${JSON.stringify(gateMarks.map((mark) => mark.label))}, the exits ${JSON.stringify(seen.exits)}`);
+      if (seen.marks[seen.marks.length - 1].kind !== 'travel' || seen.marks[seen.marks.length - 1].label !== 'Signpost') errors.push(`compass: no mark for the signpost: ${JSON.stringify(seen.marks.map((mark) => mark.kind))}`);
+      if (JSON.stringify(seen.labels) !== JSON.stringify(seen.marks.map((mark) => [mark.kind, mark.label]))) errors.push(`compass: the labels on screen are ${JSON.stringify(seen.labels)}`);
+      for (const mark of seen.marks) {
+        const bearing = Math.atan2(-(mark.x - seen.player.x), -(mark.z - seen.player.z)) - seen.player.yaw;
+        if (Math.abs(Math.sin(bearing - mark.bearing)) > 1e-6 || Math.cos(bearing - mark.bearing) < 0) errors.push(`compass: the bearing of ${mark.label} is ${mark.bearing}`);
+      }
+    }
+    // Turning the view turns the ring: the first gate straight ahead is at the top.
+    await page.evaluate(() => {
+      const g = window.__aiv.layout.gates[0];
+      window.__aiv.lookAt(g.x, g.z);
+    });
+    await page.waitForFunction(() => Math.abs(window.__aiv.compass?.[0]?.bearing ?? 1) < 0.01, null, { timeout: 5000 }).catch(() => errors.push('compass: the gate looked at is not straight ahead'));
+    await worldShot('compass');
+  }
+
+  // 5d. The journal: J opens it, I and C switch, J and Esc close, and the menu has it.
+  {
+    const book = await openJournal();
+    if (book.sockets.length !== 5 || book.locked) errors.push(`journal-0-shards: ${book.sockets.length} sockets, pointer locked ${book.locked}`);
+    for (const [i, socket] of book.sockets.entries()) {
+      const shard = book.view.shards[i];
+      if (socket.found !== shard.found || socket.label !== (shard.found ? shard.name : '???') || (socket.colour !== '') !== shard.found) errors.push(`journal-0-shards: socket ${i} shows ${JSON.stringify(socket)} for ${JSON.stringify(shard)}`);
+    }
+    if (serve && book.sockets.some((socket) => socket.found)) errors.push(`journal-0-shards: a fresh campaign has shards: ${JSON.stringify(book.sockets)}`);
+    if (book.acts.length !== 3 || !book.acts[0].includes(campaign.acts[0].title) || !book.acts[0].includes(`Main quest: ${campaign.acts[0].mainQuest}`)) errors.push(`journal-0-shards: Act 1 reads "${(book.acts[0] ?? '').slice(0, 200)}"`);
+    if (serve && !(book.acts[0].includes('In progress') && book.acts[1].includes('???') && book.acts[1].includes('Locked') && book.acts[1].includes('The road ahead is not yet known.'))) {
+      errors.push(`journal-0-shards: the acts read ${JSON.stringify(book.acts).slice(0, 400)}`);
+    }
+    if (book.deeds.length !== 4 || !book.deeds[0].startsWith('Monsters Slain') || book.complete !== book.view.campaign_complete) errors.push(`journal-0-shards: the deeds are ${JSON.stringify(book.deeds)}`);
+    await shot('journal-0-shards');
+    await page.keyboard.press('KeyM');
+    await page.keyboard.press('KeyE');
+    if (await page.evaluate(() => window.__aiv.menuOpen || window.__aiv.panel !== 'journal')) errors.push('journal: M or E did something while it was open');
+    await page.keyboard.press('KeyI');
+    await page.waitForFunction(() => window.__aiv.panel === 'inventory' && document.getElementById('journal-panel').hidden, null, { timeout: 10000 }).catch(() => errors.push('journal: I does not switch to the inventory'));
+    await page.keyboard.press('KeyJ');
+    await page.waitForFunction(() => window.__aiv.panel === 'journal' && document.getElementById('inventory-panel').hidden, null, { timeout: 10000 }).catch(() => errors.push('journal: J does not switch from the inventory'));
+    await page.keyboard.press('KeyC');
+    await page.waitForFunction(() => window.__aiv.panel === 'sheet', null, { timeout: 10000 }).catch(() => errors.push('journal: C does not switch to the character sheet'));
+    await page.keyboard.press('KeyJ');
+    await page.waitForFunction(() => window.__aiv.panel === 'journal', null, { timeout: 10000 }).catch(() => errors.push('journal: J does not switch from the character sheet'));
+    await page.keyboard.press('KeyJ');
+    await page.waitForFunction(() => window.__aiv.panel === null && document.getElementById('journal-panel').hidden, null, { timeout: 5000 }).catch(() => errors.push('journal: J does not close it'));
+    await page.keyboard.press('KeyM');
+    await page.waitForSelector('#menu-journal', { state: 'visible', timeout: 5000 });
+    await page.click('#menu-journal');
+    await page.waitForFunction(() => window.__aiv.panel === 'journal' && !window.__aiv.menuOpen, null, { timeout: 10000 }).catch(() => errors.push('journal: the menu entry does not open it'));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__aiv.panel === null, null, { timeout: 5000 }).catch(() => errors.push('journal: Esc does not close it'));
+    if (await page.evaluate(() => window.__aiv.menuOpen)) errors.push('journal: Esc opened the menu');
+    await stillHome('journal');
+  }
+
+  // Back to the town square for the walk through its gate.
+  await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+  await openTitle();
+  await enterWorld();
 
   // 6. Walk through the first gate with the W key held down.
   const gate = await page.evaluate(() => {
@@ -596,7 +848,8 @@ try {
     for (const part of [`XP ${after.character.xp}/${after.character.xp_to_next_level}`, `Gold ${after.character.gold}`]) {
       if (!hud.includes(part)) errors.push(`battle-after: the HUD shows "${hud}", without "${part}"`);
     }
-    if (!(after.character.xp > 0 && after.character.gold > 0)) errors.push(`battle-after: no XP or gold after the victory: ${JSON.stringify(after.character)}`);
+    // A fight of exactly five rounds gives the 150 XP of level 2, which leaves 0 XP at level 2.
+    if (!((after.character.xp > 0 || after.character.level > 1) && after.character.gold > 0)) errors.push(`battle-after: no XP or gold after the victory: ${JSON.stringify(after.character)}`);
     await worldShot('battle-after');
     await worldShot('content-monster-gone');
 
@@ -1291,6 +1544,154 @@ try {
     if (new URL(page.url()).pathname !== '/') errors.push(`the shop and the quests left / for ${page.url()}`);
   } else {
     console.log(`skipped without --serve (the session cannot be edited): ${shopSteps.join(', ')}`);
+  }
+
+  // 16c. Travel into Act 2, Lady Vex's ambush on the road, the journal with three shards, and the ending.
+  const journeySteps = ['arrival-act2', 'ambush-intro', 'ambush-fight', 'ambush-arrival', 'journal-3-shards', 'ending-crown', 'ending-text', 'ending-legend', 'ending-title'];
+  if (serve) {
+    const strong = (session) => {
+      session.character.level = 20;
+      session.character.max_hit_points = session.character.current_hit_points = 9999;
+      session.battle.is_active = false;
+      session.pending_event = null;
+      session.event_result = null;
+      session.area_contents = null;
+    };
+    const fellWith20 = async (name) => {
+      editSession((session) => {
+        session.battle.monster.hp = 1;
+      });
+      writeFileSync(join(dataDir, 'd20.txt'), '20');
+      await fightUntil('KeyA', 'victory', name);
+    };
+
+    // 1. Act 1 is complete: the map lets the character into Act 2, and nobody waits on the road yet.
+    editSession((session) => {
+      strong(session);
+      session.defeated_bosses = ['Shard Guardian', 'Corrupted Captain'];
+      session.location_name = 'Rivermeet Town';
+      session.area_id = 'town_square';
+      session.act_num = 1;
+    });
+    await openTitle();
+    await enterWorld();
+    await openMap(null);
+    if (await page.evaluate(() => window.__aiv.travel.acts[1].locked || !window.__aiv.travel.acts[2].locked)) errors.push('arrival-act2: Act 2 is not open or Act 3 is not locked');
+    await page.click('#travel-acts button[data-location="Emberforge Mountains"]');
+    await arrived('Emberforge Mountains', 'mountain_pass', 2, 'arrival-act2');
+
+    // 2. Two guardians of Act 2 have fallen: Lady Vex strikes on the road to the temple.
+    const vex = bosses['Lady Vex'];
+    editSession((session) => {
+      strong(session);
+      session.defeated_bosses = ['Shard Guardian', 'Corrupted Captain', 'Flame Cultist Leader', 'Corrupted High Priest'];
+    });
+    await openTitle();
+    await enterWorld();
+    await openMap(null);
+    await page.keyboard.press('Digit5');
+    await page.waitForFunction(() => window.__aiv.screen === 'intro' && window.__aiv.road === true && !document.getElementById('boss-intro').hidden && window.__aiv.loading === false, null, { timeout: 60000 });
+    await page.waitForFunction(() => window.__aiv.travelling === false && Number(getComputedStyle(document.getElementById('veil')).opacity) <= 0.05, null, { timeout: 15000 }).catch(() => {});
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('KeyM');
+    await page.waitForTimeout(200);
+    const met = await page.evaluate(() => ({
+      id: window.__aiv.intro, name: document.getElementById('boss-intro-name').textContent, title: document.getElementById('boss-intro-title').textContent,
+      text: document.getElementById('boss-intro-text').textContent, back: !document.getElementById('boss-intro-back').hidden, screen: window.__aiv.screen, menu: window.__aiv.menuOpen,
+      gates: window.__aiv.layout.gates.length, contents: window.__aiv.contents, compass: window.__aiv.compass, state: window.__aiv.state, place: document.getElementById('hud-location').textContent,
+      errors: window.__aiv.modelErrors,
+    }));
+    if (met.id !== 'Lady Vex' || met.name !== vex.name || met.title !== vex.title || met.text !== vex.intro) errors.push(`ambush-intro: the introduction shows ${JSON.stringify([met.id, met.name, met.title]).slice(0, 300)}`);
+    if (met.back || met.screen !== 'intro' || met.menu) errors.push(`ambush-intro: Step back shown ${met.back}, screen ${met.screen} after Esc, menu ${met.menu}`);
+    if (met.gates !== 0 || met.contents !== null || met.compass !== null || met.place !== 'The Road' || met.errors.length) errors.push(`ambush-intro: the road has ${met.gates} gates, contents ${JSON.stringify(met.contents)}, place "${met.place}", model errors ${JSON.stringify(met.errors)}`);
+    if (met.state.location.name !== 'Sunken Temple of Dariel' || met.state.pending?.kind !== 'battle') errors.push(`ambush-intro: the state is ${met.state.location.name}, pending ${JSON.stringify(met.state.pending)}`);
+    await stillHome('ambush-intro');
+    await shot('ambush-intro');
+
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
+    await page.waitForTimeout(500);
+    await untilOpen();
+    const onRoad = async (name) => {
+      const seen = await page.evaluate(() => ({
+        road: window.__aiv.road, monster: window.__aiv.battle.view.monster, player: window.__aiv.player, slot: window.__aiv.layout.slots.monster,
+        intro: !document.getElementById('boss-intro').hidden, plate: document.getElementById('battle-monster').textContent, flee: document.querySelector('#battle-actions .btn-flee') !== null,
+      }));
+      const distance = Math.hypot(seen.player.x - seen.slot.x, seen.player.z - seen.slot.z);
+      if (!seen.road || seen.monster.place !== 'road' || seen.monster.boss_id !== 'Lady Vex' || seen.intro || seen.flee) errors.push(`${name}: road ${seen.road}, place ${seen.monster.place}, boss ${seen.monster.boss_id}, introduction ${seen.intro}, flee ${seen.flee}`);
+      if (!seen.plate.includes(vex.name)) errors.push(`${name}: the plate shows "${seen.plate}"`);
+      if (!(distance >= 1.5 - 1e-6 && distance <= 2.5 + 1e-6)) errors.push(`${name}: the player stands ${distance.toFixed(2)} m from Lady Vex`);
+    };
+    await onRoad('ambush-fight');
+    await shot('ambush-fight');
+
+    // A reload in the middle of it: the road again, the fight open, no introduction.
+    await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+    await page.waitForFunction(() => window.__aiv?.screen === 'battle' && window.__aiv.battle !== null && window.__aiv.road === true && !document.getElementById('battle-panel').hidden, null, { timeout: 60000 });
+    await untilOpen();
+    await onRoad('ambush-reload');
+
+    // She falls: Continue ends the journey where it was going.
+    await fellWith20('ambush-arrival');
+    await page.keyboard.press('Enter');
+    await arrived('Sunken Temple of Dariel', 'coastal_approach', 2, 'ambush-arrival');
+    const peace = await page.evaluate(() => fetch('/api/journal').then((r) => r.json()));
+    if (peace.journal.stats.bosses !== 5 || peace.state.pending !== null) errors.push(`ambush-arrival: ${peace.journal.stats.bosses} bosses defeated, pending ${JSON.stringify(peace.state.pending)}`);
+
+    // 3. The journal now has three shards in the crown.
+    const book = await openJournal();
+    const found = book.sockets.filter((socket) => socket.found);
+    if (JSON.stringify(found.map((socket) => socket.label)) !== JSON.stringify(['Shard of Verdance', 'Shard of Embers', 'Shard of Tides']) || found.some((socket) => socket.colour === '')) {
+      errors.push(`journal-3-shards: the crown shows ${JSON.stringify(book.sockets)}`);
+    }
+    if (book.sockets.filter((socket) => socket.label === '???').length !== 2 || book.complete) errors.push(`journal-3-shards: ${JSON.stringify(book.sockets.map((socket) => socket.label))}, complete ${book.complete}`);
+    if (!book.acts[0].includes('Complete') || !book.acts[1].includes('In progress') || !book.acts[1].includes('Lvl ')) errors.push(`journal-3-shards: the acts read ${JSON.stringify(book.acts).slice(0, 400)}`);
+    await shot('journal-3-shards');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.__aiv.panel === null, null, { timeout: 5000 });
+
+    // 4. Malachar is the last one standing. He falls, and Continue plays the ending.
+    editSession((session) => {
+      strong(session);
+      session.defeated_bosses = Object.keys(bosses).filter((id) => id !== 'Malachar the Void-touched');
+      session.location_name = 'The Convergence';
+      session.area_id = 'ritual_chamber';
+      session.act_num = 3;
+    });
+    await openTitle();
+    await enterWorld();
+    await walkTo('boss', 2.6);
+    await page.keyboard.press('KeyE');
+    await page.waitForFunction(() => window.__aiv.screen === 'intro' && window.__aiv.intro === 'Malachar the Void-touched', null, { timeout: 10000 });
+    if (!(await page.isVisible('#boss-intro-back'))) errors.push('ending: Step back is missing from the introduction of a boss that is no ambush');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
+    await fellWith20('ending-crown');
+    const last = await page.evaluate(() => ({
+      complete: window.__aiv.battle.view.rewards?.boss?.campaign_complete, link: document.querySelector('#battle-result a') !== null,
+      line: document.querySelector('#battle-result .boss-line[data-kind="complete"]')?.textContent ?? null,
+    }));
+    if (last.complete !== true || last.link || last.line !== 'The Crown of Unity is whole again.') errors.push(`ending-crown: the result panel: ${JSON.stringify(last)}`);
+    const before = readFileSync(join(dataDir, 'sessions', readdirSync(join(dataDir, 'sessions'))[0]), 'utf8');
+    await page.keyboard.press('Enter');
+    await throughEnding('ending', ['ending-crown', null, 'ending-text', null, 'ending-legend']);
+    await stillHome('ending-title');
+    await shot('ending-title');
+
+    // The same from the journal: Continue on the title screen, J, "Relive the ending".
+    await enterWorld();
+    const whole = await openJournal();
+    if (!whole.complete || whole.sockets.some((socket) => !socket.found)) errors.push(`ending: the journal of a finished campaign shows ${JSON.stringify(whole.sockets.map((socket) => socket.label))}, complete ${whole.complete}`);
+    await page.click('#journal-ending');
+    await throughEnding('ending-relived', []);
+    const after = JSON.parse(readFileSync(join(dataDir, 'sessions', readdirSync(join(dataDir, 'sessions'))[0]), 'utf8'));
+    const was = JSON.parse(before);
+    // Continue after the victory took the rewards; nothing else of the session has changed since.
+    for (const key of ['defeated_bosses', 'location_name', 'area_id', 'act_num', 'monster_kills', 'character']) {
+      if (JSON.stringify(after[key]) !== JSON.stringify(was[key])) errors.push(`ending: the session's ${key} changed during the ending`);
+    }
+  } else {
+    console.log(`skipped without --serve (the session cannot be edited): ${journeySteps.join(', ')}`);
   }
 
   // 17. A model that does not load: a fresh page in the town square, with the request for the well refused.

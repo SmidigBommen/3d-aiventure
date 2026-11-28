@@ -147,7 +147,7 @@ class TestState:
 
     def test_the_area_keys(self, client):
         assert set(client.get("/api/state").json()["area"]) == {
-            "id", "name", "description", "danger", "has_shop", "can_rest", "has_boss", "is_boss_area", "special"}
+            "id", "name", "description", "danger", "has_shop", "can_rest", "has_boss", "is_boss_area", "special", "is_start"}
 
     def test_a_boss_that_is_not_in_the_boss_data_makes_no_boss_area(self):
         assert world.is_boss_area({"boss": "Nobody"}) is False

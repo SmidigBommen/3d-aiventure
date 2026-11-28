@@ -4,16 +4,12 @@
 <div class="result-screen victory ending-screen" data-confetti data-sound="victory">
     <span class="act-label">Epilogue</span>
     <h1>The Crown Restored</h1>
-    <p class="page-subtitle">{{ campaign.title }}</p>
+    <p class="page-subtitle">{{ ending.campaign_title }}</p>
 
     <div class="home-story glass ending-story">
-        <p>The wound in the sky above the Convergence closes, and for the first time in a
-        generation the five provinces of Eldoria wake to the same quiet dawn.</p>
-        <p>The Crown of Unity is whole again &mdash; not because a king willed it, but because
-        {{ character.name }}, a {{ character.race }} {{ character.class_name }} out of Rivermeet,
-        carried its shards through forest, fire, flood, storm and stone, and would not put them down.</p>
-        <p>In the Whispering Woods the trees speak gently again. The beacon on the old watchtower
-        is lit. And in a tavern called the Flowing Tankard, they are already getting the story wrong.</p>
+        {% for paragraph in ending.paragraphs %}
+        <p>{{ paragraph }}</p>
+        {% endfor %}
     </div>
 
     <div class="rewards-panel">

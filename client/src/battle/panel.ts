@@ -194,11 +194,6 @@ export function showResult(view: BattleView): void {
     const line = (made: VictoryLine): HTMLElement => {
       const node = h('p', 'boss-line', made.text);
       node.dataset.kind = made.kind;
-      if (made.kind === 'complete') {
-        const ending = h('a', '', 'The ending') as HTMLAnchorElement;
-        ending.href = '/game/ending';
-        node.append(' ', ending);
-      }
       return node;
     };
     const proceed = h('button', 'btn', 'Continue') as HTMLButtonElement;

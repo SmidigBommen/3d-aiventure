@@ -1,6 +1,7 @@
 // The server's JSON API. The server decides everything; this only carries it.
 
 import type { BattleAction, BattleView } from './battle/view';
+import type { EndingView, JournalView, TravelView } from './world/campaign';
 import type { AreaContents } from './world/contents';
 import type { EventResult, EventView } from './world/event';
 import type { InventoryView, ItemActionKind, SheetView } from './world/sheet';
@@ -34,6 +35,7 @@ export interface WorldState {
     has_boss: boolean; // an undefeated boss waits here
     is_boss_area: boolean; // the campaign places a boss here, defeated or not
     special: string | null; // the area's `special` from the campaign data
+    is_start: boolean; // travel arrives in this area: it has the signpost
   } | null;
   exits: { id: string; name: string; danger: Danger }[];
   pending: { kind: 'battle' | 'event' | 'defeat'; url: string } | null;
@@ -193,6 +195,52 @@ export async function postShopItem(action: 'buy' | 'sell' | 'haggle', itemIndex:
 /** Accepting, turning in or abandoning the quest with this id. */
 export async function postShopQuest(action: 'accept' | 'turn-in' | 'abandon', questId: string): Promise<ShopAnswer> {
   return asShop(await post<ShopBody>(`/api/shop/quest/${action}`, { quest_id: questId }));
+}
+
+// --- travel, the journal and the ending ---
+
+async function get<T>(path: string): Promise<{ ok: true; value: T } | Refusal> {
+  try {
+    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
+    const answer = await response.json();
+    if (response.ok) return { ok: true, value: answer as T };
+    return { ok: false, error: String(answer.error), message: String(answer.message) };
+  } catch {
+    return { ok: false, error: 'network', message: 'The server did not answer.' };
+  }
+}
+
+/** The boss that strikes on the road, as the introduction shows it. */
+export interface Ambush { id: string; name: string; title: string; intro: string | null }
+type TravelBody = { travel: TravelView; state: WorldState; battle?: BattleView | null; ambush?: Ambush | null };
+export type TravelAnswer = { ok: true; travel: TravelView; state: WorldState; battle: BattleView | null; ambush: Ambush | null } | Refusal;
+
+const asTravel = (answer: { ok: true; value: TravelBody } | Refusal): TravelAnswer =>
+  (answer.ok ? { ok: true, travel: answer.value.travel, state: answer.value.state, battle: answer.value.battle ?? null, ambush: answer.value.ambush ?? null } : answer);
+
+/** The map: every act and location, what is locked and where the character is. */
+export async function fetchTravel(): Promise<TravelAnswer> {
+  return asTravel(await get<TravelBody>('/api/travel'));
+}
+
+/** The journey to a location. The answer carries the ambush and its fight when one is sprung on the road. */
+export async function postTravel(location: string): Promise<TravelAnswer> {
+  return asTravel(await post<TravelBody>('/api/travel', { location }));
+}
+
+export type JournalAnswer = { ok: true; journal: JournalView; state: WorldState } | Refusal;
+
+export async function fetchJournal(): Promise<JournalAnswer> {
+  const answer = await get<{ journal: JournalView; state: WorldState }>('/api/journal');
+  return answer.ok ? { ok: true, journal: answer.value.journal, state: answer.value.state } : answer;
+}
+
+export type EndingAnswer = { ok: true; ending: EndingView; state: WorldState } | Refusal;
+
+/** The epilogue; refused until the campaign is complete. */
+export async function fetchEnding(): Promise<EndingAnswer> {
+  const answer = await get<{ ending: EndingView; state: WorldState }>('/api/ending');
+  return answer.ok ? { ok: true, ending: answer.value.ending, state: answer.value.state } : answer;
 }
 
 // --- the fight ---

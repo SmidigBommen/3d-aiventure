@@ -78,6 +78,7 @@ web/fight.py, web/world.py       the fight and the world as functions of a sessi
 web/events.py                    exploration events as functions of a session, shared by both interfaces
 web/inventory.py, web/sheet.py   the backpack and the character sheet as functions of a session, shared by both interfaces
 web/shop.py                      Elara's shop and the quest board as functions of a session, shared by both interfaces
+web/travel.py                    travel, the journal and the ending as functions of a session, shared by both interfaces
 web/routes/, web/templates/      the classic server-rendered interface
 engine/, *.py, json/             rules engine, domain model and game data
 test/                            pytest tests
@@ -100,8 +101,8 @@ tools/                           balance simulator, sprite drawing, classic scre
   frame of walking and turning. All three are pure; `testkit.ts` holds the measuring helpers of
   their tests.
 - `area` in both answers carries what the client dresses the area by: `has_shop`, `can_rest`,
-  `is_boss_area` (the campaign places a boss there, defeated or not; `world.is_boss_area`) and
-  `special` (the campaign's string, or null).
+  `is_boss_area` (the campaign places a boss there, defeated or not; `world.is_boss_area`),
+  `special` (the campaign's string, or null) and `is_start` (travel arrives here: `world.starting_area`).
 - `client/src/world/models.json` is the model manifest: per `.glb` under `client/public/models/`
   its bounding size and triangle count. `node tools/make_model_manifest.mjs` writes it (`--check`
   compares); run it after adding or changing a model. Never edit it by hand.
@@ -137,7 +138,8 @@ tools/                           balance simulator, sprite drawing, classic scre
   or the boss id while the boss introduction is open and `screen` is `'intro'`), `panel` (null,
   `'inventory'`, `'sheet'` or `'shop'` while that panel is on screen; `screen` stays `'world'`, `prompt` and
   `interaction` are null), `inventory` and `sheet` (the views of the last answer), `shop` (null, or
-  `{view, tab, haggle}` while the shop panel is open), `resting`, and the
+  `{view, tab, haggle}` while the shop panel is open), `resting`, what "Travel, journal, compass and
+  the ending" below adds (`travel`, `journal`, `arrival`, `compass`, `road`, `ending`, `travelling`), and the
   actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
   boss introduction). A fight, an event and an introduction have no actions here: the smoke test
   presses the real keys.
@@ -158,12 +160,62 @@ tools/                           balance simulator, sprite drawing, classic scre
 - With `--serve` the smoke test starts the server through `execution/smoke_server.py`, which wraps
   `Dice.roll_d20`: while `$AIVENTURE_DATA/d20.txt` holds numbers, a d20 roll takes the first one and
   removes it. Nothing under `web/`, `engine/` or `client/` reads a test setting.
-- Travel, journal and saves still happen on the classic pages, reached from the menu
-  (M or Esc); the classic navigation links back with "3D world". Battles, events and bosses are met
+- Saves still happen on the classic pages, reached from the menu (M or Esc); the classic navigation
+  links back with "3D world". Travel, the journal and the ending are in the world ("Travel, journal,
+  compass and the ending" below); their classic pages keep working. Battles, events and bosses are met
   and played in the world ("Fighting in the world" and "Events and bosses in the world" below);
   inventory, character sheet and rest are panels and a landmark in the world ("Inventory, character
   sheet and rest" below); the shop and the quests are Elara in her stall ("Elara's shop and quests"
   below). The classic `/shop` page keeps working.
+
+### Travel, journal, compass and the ending
+
+- **Shared functions** in `web/travel.py`, in the pattern of `web/inventory.py`: `travel_view`,
+  `travel(session, location_name, in_3d=False)` (`"arrived"`, `"ambush"` or `"defeat"`; raises
+  `fight.Rejected` `no_such_location` or `act_locked` before anything changed, through
+  `check_destination`), `journal_view`, `ending_view` (raises `not_complete`) and `EPILOGUE`, the
+  only copy of the epilogue text. The classic routes `/game/travel`, `/game/journal` and
+  `/game/ending` are thin wrappers; the travel page drops the current location from the view.
+- **API** (`web/api/travel.py`, under `/api`): `GET travel`, `POST travel` (`{"location"}`),
+  `GET journal`, `GET ending`. The GET routes write nothing and are answered whatever is pending.
+  `POST travel` checks in this order: `no_character`, `bad_request`, `pending`, `no_such_location`,
+  `act_locked`, `already_here` (the last one and `pending` exist in the API only). Its answer is
+  `{"travel", "state", "battle", "ambush"}`; `battle` and `ambush` (`id`, `name`, `title`, `intro`)
+  are non-null exactly when Lady Vex strikes.
+- **The ambush in 3D**: `POST /api/travel` sets `return_to_3d` and the battle place `"road"` (a
+  value of `BATTLE_PLACES`); the character is already at the destination in the session. Classic
+  `POST /game/travel` still sets `return_to_3d = False` and place `"monster"`.
+- **Signpost**: `DressSpec.travel` (from `area.is_start`) places one `landmark: 'travel'`
+  (`env/town/signpost`, 2.6 m) after the other landmarks. `slots.travel` is where one stands at
+  it (`landmarkPoint`, chosen after `slots.landmark` and `slots.rest`, 1.5 m off every other slot).
+  `interactionAt` offers `{kind: 'travel', prompt: 'E: travel'}` within 3 m, last in a tie.
+  Measured in `travel.test.ts`.
+- **`ROAD_SPEC`** in `dressing.ts` is the road of the ambush: a wilderness area without gates.
+  `enterRoad` in `main.ts` builds it in place of the area, with a dirt strip from the spawn through
+  `slots.monster` (`buildAreaScene(..., road)`, the only scene with that geometry). While `road`
+  is true `contentsOf` gives null, so nothing of the destination is drawn or offered there.
+- **`client/src/world/campaign.ts`** (pure): the types of the three views and the lines
+  (`travelChoices`, `travelChoiceForKey`, `arrivalTitle`, `shardSockets`, `SHARD_COLOURS`,
+  `actBadge`, `endingSteps`, `legendLines`, `ARRIVAL_SECONDS`). **`client/src/world/compass.ts`**
+  (pure): `compassMarks(layout, exits, contents, player)`, gates first, then shop, rest, boss,
+  signpost; bearing 0 is straight ahead, positive to the left.
+  **`client/src/world/campaignPanel.ts`** fills `#travel-panel`, `#journal-panel`, `#arrival`,
+  `#hud-compass` and `#ending-panel`. **`client/src/endingScene.ts`** is the crown under the dawn
+  sky, plain geometry.
+- **`main.ts`**: E at the signpost opens the map (`openTravel`); keys 1 to 8 or a click choose
+  (`chooseTravel`: a disabled choice shows its reason in `.panel-message`), Esc closes. `travelTo`
+  fades to black, posts, enters the area (`enterArea`) or the road (`enterRoad`, then the
+  introduction without Step back), fades back and shows `#arrival`; `travelling` is true
+  meanwhile. After an ambush `resumeWalk` and `riseAgain` end in `finishJourney`. A reload with a
+  pending fight whose place is `'road'` builds the road again. J and `#menu-journal` open the
+  journal (`openJournal`); I, C and J switch between the three panels. The compass is drawn every
+  frame while `screen` is `'world'` and not on the road. `proceed` plays the ending
+  (`playEnding`, `screen` `'ending'`) after the victory whose rewards say `campaign_complete`;
+  "Relive the ending" in the journal plays it too. The ending posts nothing.
+- The smoke test travels from the signpost of Rivermeet to the Whispering Woods in both modes
+  (map, locked act, fade, arrival, compass, journal); with `--serve` it also travels into Act 2,
+  is ambushed and wins (with a reload on the road), reads the journal with three shards, and
+  fells Malachar for the ending, which it then relives from the journal.
 
 ### What an area holds
 

@@ -44,6 +44,13 @@ def is_boss_area(area) -> bool:
     return bool(area) and area.get("boss") in get_bosses()
 
 
+def starting_area(location):
+    """The area travel arrives in: the one the location names, else its first."""
+    areas = location.get("areas", []) if location else []
+    start_id = location.get("starting_area") if location else None
+    return next((a for a in areas if a["id"] == start_id), areas[0] if areas else None)
+
+
 def pending(session: GameSession):
     """What the player has to deal with before they can walk on: {"kind", "url"} or None."""
     if session.battle.is_active:
@@ -254,6 +261,7 @@ def world_state(session: GameSession) -> dict:
             "has_boss": campaign_rules.get_area_boss(area, get_bosses(), session.defeated_bosses) is not None,
             "is_boss_area": is_boss_area(area),
             "special": area.get("special"),
+            "is_start": area["id"] == (starting_area(location) or {}).get("id"),
         } if area else None,
         "exits": [
             {"id": aid, "name": by_id[aid]["name"], "danger": danger_band(by_id[aid])}
