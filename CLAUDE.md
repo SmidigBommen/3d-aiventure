@@ -60,6 +60,7 @@ pnpm build                       # type-check and build the client into client/d
 uv run pytest -q                 # server tests (test/)
 pnpm test                        # client tests (client/src/**/*.test.ts)
 node execution/smoke.mjs --serve --out /tmp/smoke    # browser walk-through, after pnpm build
+node execution/frames.mjs        # frame times of the reference scenes against the baseline, after pnpm build
 pnpm serve                       # the server on :8000, serving client/dist at /
 pnpm dev                         # Vite dev server for the client, passing API calls on to :8000
 ```
@@ -71,7 +72,8 @@ volume), otherwise under `web/sessions` and `web/saves`.
 
 ```
 client/index.html, client/src/   the 3D client (TypeScript, Three.js, Vite); world/ the areas, battle/ the fight;
-                                 creation.ts, saves.ts, settings.ts (pure) and startPanel.ts for what comes before the world
+                                 creation.ts, saves.ts, settings.ts (pure) and startPanel.ts for what comes before the world;
+                                 sound/ the cues and volumes (pure) and the synthesizer
 client/public/                   files served as they are (models, favicon)
 web/app.py                       FastAPI app: API, classic routes, and client/dist mounted at /
 web/api/                         JSON API routers (added by work items)
@@ -88,6 +90,7 @@ test/                            pytest tests
 holdout/                         not in the repository; the factory puts hidden acceptance tests here when it runs them
 execution/smoke.mjs              browser smoke test
 execution/smoke_server.py        the server as the smoke test starts it: d20 rolls can be set from a file
+execution/frames.mjs             frame times of the reference scenes; frame_baseline.json is what commit 4fbc1f5 takes
 tools/                           balance simulator, sprite drawing, classic screenshot tour, model manifest
 ```
 
@@ -143,7 +146,8 @@ tools/                           balance simulator, sprite drawing, classic scre
   `interaction` are null), `inventory` and `sheet` (the views of the last answer), `shop` (null, or
   `{view, tab, haggle}` while the shop panel is open), `resting`, what "Travel, journal, compass and
   the ending" below adds (`travel`, `journal`, `arrival`, `compass`, `road`, `ending`, `travelling`), what "Character creation,
-  title screen, saves and settings" below adds (`creation`, `opening`, `saves`, `settings`, `settingsOpen`), and the
+  title screen, saves and settings" below adds (`creation`, `opening`, `saves`, `settings`, `settingsOpen`), what
+  "Sound and feel" below adds (`sound`, `monster`, `vignette`, `loadingCard`), and the
   actions `lookAt(x, z)` and `interact()` (what the E key runs: it also opens the event panel and the
   boss introduction). A fight, an event and an introduction have no actions here: the smoke test
   presses the real keys.
@@ -178,6 +182,69 @@ tools/                           balance simulator, sprite drawing, classic scre
   inventory, character sheet and rest are panels and a landmark in the world ("Inventory, character
   sheet and rest" below); the shop and the quests are Elara in her stall ("Elara's shop and quests"
   below). The classic `/shop` page keeps working.
+
+### Sound and feel
+
+- **No server part.** Nothing under `web/`, `engine/` or `json/` knows of it. The only randomness it adds is when
+  the chirps and drips of the ambience fall (`audio.ts`).
+- **`client/src/sound/cues.ts`** (pure) says which cue sounds when: `SOUND_CUES` (the 12 of the classic `SFX`
+  plus `step_stone`, `step_grass`, `step_dungeon`, `gate`, `prompt`, `notice`, `save`, `shard`),
+  `turnEventSound(event)`, `turnSounds(events, timeline)` (one per event, at the time its effect shows),
+  `resultSounds(view)` (`victory`, `shard`, `levelup` or `defeat`), `groundOf`, `stepSound(type)`,
+  `ambienceFor(type, fighting)` and `ACTION_SOUNDS`: every other action of the player by name, with its cue or
+  `null` for "deliberately silent". A new action gets a key there and an `actionSound('key')` in `main.ts`.
+- **`client/src/sound/volume.ts`** (pure): `SoundSettings` (`effects`, `ambience`, `muted`), `DEFAULT_SOUND`,
+  `parseSound`, `serializeSound`, `toggleMute`, `gains`; stored under `localStorage['aiv.sound']`, apart from
+  `Settings`. **`client/src/sound/audio.ts`** is the synthesizer (Web Audio, no files): `createSoundEngine()`
+  with `unlock`, `play(cue)`, `setAmbience` (a bed per location type, crossfaded over 1 s, and a tense layer in
+  a fight) and `setGains`. It makes no `AudioContext` before `unlock`, which `main.ts` calls on the first
+  `pointerdown` or `keydown`.
+- **`main.ts`**: `cue(name)` is the one place that records (`cueLog`, the last 500) and plays; a cue asked for
+  before the unlock is dropped. A panel's action sounds when its answer arrives (`refused` for a refusal). The
+  cues of a turn are played by `advancePlayback` from `turnSounds`, those of a result 0.7 s apart from the frame
+  loop (`fanfare`). N mutes on every screen unless a text field has the key (`typing`); `#hud-mute` shows it.
+  The settings panel has `#settings-effects`, `#settings-ambience` and `#settings-mute` (`renderSound`,
+  `useSound`).
+- **`client/src/world/feel.ts`** (pure): the stride (`startGait`, `gaitStep`: a footstep per `STRIDE` m walked,
+  none while standing), `bobOffset`, `shakeOf(event)` (`SHAKE_HIT`, `SHAKE_CRIT`) and `vignette(hp, max)`. The
+  frame loop adds the bob to the eye height, shakes the view of a fight when the event sounds, and sets the
+  opacity of `#vignette` from the hit points on screen (0 where there is no character: title, creation, opening,
+  ending).
+- **`client/src/world/wander.ts`** (pure): the monster of an area walks at `WANDER_SPEED` between targets
+  (`wanderTarget`, one per `WANDER_PERIOD`, the same for the same seed) that keep `allowedAt`: within
+  `WANDER_RADIUS` of its slot, `KEEP_OFF` from gates and spawn points, `SLOT_ROOM` from the event and boss slots,
+  on free floor. `wanderStep` moves it, or makes it stand and face a player within `NOTICE_RANGE` (until
+  `LOSE_RANGE`). `main.ts` keeps one `roamer` per contents (`roaming()`, seed `hash(location/area) + seq`) and
+  advances it once per frame while `screen` is `'world'` and nothing is loading, crossing, travelling, resting or
+  busy. `layoutNow()` puts the monster slot where the monster is, so the prompt, the contact and the place of
+  the fight follow it; `layout.slots.monster` stays the home slot. A monster that was fled from stands where the
+  fight stood; a reload puts it back on its slot. `contentScene.setMonster(w, dt)` moves the figure, shows the
+  "!" for `NOTICE_SECONDS` and plays its attack clip once.
+- **`client/src/world/atmosphere.ts`** (pure): `airFor(location, type)` (what drifts and what glows),
+  `GLOW_MODELS`, `GLOW_COLOURS`, `flicker(t, seed)` for every burning light and `glowPulse`. `buildAreaScene(...,
+  air)` draws the drift as one `THREE.Points` around the player and gives the glowing models an emissive colour.
+  `MAX_GLOW_LIGHTS` in `areaScene.ts` is 1: a second glow light cost the town square a frame slot in the smoke
+  test's software renderer.
+- **`FLOAT_LOOKS`** in `battle/fx.ts` is the colour and size of a floating text per style; `panel.ts` uses it and
+  adds `#battle-levelup.levelup-flourish` ("Level n!") to the result panel of a victory that levels up.
+- **Loading card**: `loadingCard(view, from, to)` in `campaign.ts`. `main.ts` remembers the location last
+  entered in this page load (`lastLocation`); entering an area of another one shows its name and description in
+  `#loading` (`#loading-title`, `#loading-text`) for at least `LOADING_CARD_SECONDS`. The travel view comes from
+  the map's last answer or from one `GET /api/travel` per page load (`cardFor`). A gate inside a location shows
+  the plain text.
+- **`window.__aiv`**: `sound` (`unlocked`, `settings`, `cues`, `count`, `ambience`), `monster` (`x`, `z`, `yaw`,
+  `noticed`, or null when the area shows no monster), `vignette` and `loadingCard`.
+- **Frame time**: `execution/frames.mjs` measures the 95th percentile of the frame time over 5 s in four
+  reference scenes (`town`, `wilderness`, `dungeon`, `fight`) and compares with `execution/frame_baseline.json`,
+  recorded on commit `4fbc1f5`; the limit is 16.7 ms or 1.2 times the baseline. `node execution/frames.mjs`
+  prints the verdicts for this checkout, `--repo DIR --write` records a baseline from another one. In headless
+  Chromium with software WebGL a frame takes a multiple of 16.7 ms, so the baseline is 50 ms and one more slot
+  (66.7 ms) fails.
+- The smoke test checks, in both modes: `sound-locked`, `sound-steps` (stone, and grass and dungeon floor in the
+  reference scenes), `sound-gate`, `sound-settings`, `sound-kept`, `loading-card`, the ambience per scene and the
+  frame times; with `--serve` also `feel-noticed`, `sound-fight` (every turn of a fight against `turnSounds`,
+  which it imports from the client), `feel-levelup`, `feel-low-hp`, `sound-coin` and the frame time of a fight.
+  `walkTo('monster', range)` walks to `__aiv.monster` and plans anew when the monster has moved.
 
 ### Character creation, title screen, saves and settings
 

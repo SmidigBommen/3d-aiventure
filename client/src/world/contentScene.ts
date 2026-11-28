@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {
-  BOSS_SCALE, ELARA, ELARA_IDLE, SEARCH_MARKERS, creatureLook, objectLook, remainsOf, type AreaContents, type CreatureLook,
+  BOSS_SCALE, ELARA, ELARA_IDLE, SEARCH_MARKERS, creatureLook, creatureMotion, objectLook, remainsOf, type AreaContents, type CreatureLook,
 } from './contents';
+import { NOTICE_SECONDS, type Wanderer } from './wander';
 import { footprint, modelSize, stallFront, type Placement } from './dressing';
 import type { AreaLayout } from './layout';
 import type { Figure } from './modelLoader';
@@ -21,6 +22,8 @@ const CEILING_ROOM = 0.2; // m a boss stays under a dungeon's ceiling
 const SPENT_SHADE = 0.45; // what stays of a resolved event is this much darker
 const LID_OPEN = -1.25; // rad about the hinge of a chest's lid
 const OPENED = ['chest', 'treasure']; // object kinds that are drawn opened once resolved
+const TURN_RATE = 10; // per second: how fast the monster turns to where it looks (most of the way in 0.3 s)
+const LUNGE_SECONDS = 0.5; // the notice of a monster without an attack clip
 
 export interface ContentScene {
   group: THREE.Group;
@@ -28,6 +31,8 @@ export interface ContentScene {
   update: (x: number, z: number, time: number, dt: number) => void;
   /** Whether the "!" above Elara shows: a quest is ready to be turned in. */
   setQuestReady: (ready: boolean) => void;
+  /** Where the monster of the area stands and looks this frame, and whether it has just noticed the player. */
+  setMonster: (w: Wanderer, dt: number) => void;
   dispose: () => void;
 }
 
@@ -238,6 +243,11 @@ export function buildContentScene(
 
   let mark: THREE.Sprite | null = null;
   let markY = 0;
+  // The monster of the area. `alerted`: its notice has been played. `lunge`: seconds into the fallback motion, or -1.
+  let walker: {
+    holder: THREE.Group; root: THREE.Object3D; bang: THREE.Sprite; idle: THREE.AnimationAction | null; attack: THREE.AnimationAction | null;
+    alerted: boolean; lunge: number; turned: boolean;
+  } | null = null;
   if (slots?.shop) {
     // Elara, behind the table of her stall, looking out of the side the player comes from.
     const { x, z } = slots.shop;
@@ -260,9 +270,45 @@ export function buildContentScene(
   if (contents && slots) {
     const creature = (look: CreatureLook, scale: number): Look => ({ ...look, scale });
     if (contents.monster) {
-      const { root, top } = stand(creature(creatureLook(contents.monster.race), creatureLook(contents.monster.race).scale), slots.monster.x, slots.monster.z);
-      facing.push(root);
-      name([contents.monster.name, `${contents.monster.race} · Level ${contents.monster.level}`], slots.monster.x, slots.monster.z, top);
+      // The monster walks (wander.ts says where): it, its plate and the "!" of its notice move together.
+      const look = creatureLook(contents.monster.race);
+      const standing = own(standModel(look, figures.get(look.model) ?? null));
+      const holder = new THREE.Group();
+      holder.position.set(slots.monster.x, 0, slots.monster.z);
+      holder.add(standing.root);
+      const plate = label([contents.monster.name, `${contents.monster.race} · Level ${contents.monster.level}`]);
+      own(plate.material);
+      own(plate.material.map as THREE.Texture);
+      const half = plate.scale.y / 2;
+      const plateY = standing.top + 0.25 + half;
+      plate.position.y = layout.ceiling === null ? plateY : Math.min(plateY, layout.ceiling - half - 0.02);
+      holder.add(plate);
+      const bang = questMark();
+      own(bang.material);
+      own(bang.material.map as THREE.Texture);
+      bang.material.color.set('#ff8a5a');
+      bang.position.y = plate.position.y + half + 0.4;
+      bang.visible = false;
+      holder.add(bang);
+      group.add(holder);
+      let idle: THREE.AnimationAction | null = null;
+      let attack: THREE.AnimationAction | null = null;
+      if (standing.body && standing.clips.length) {
+        const mixer = new THREE.AnimationMixer(standing.body);
+        const resting = idleClip(standing.clips);
+        const how = creatureMotion(look.model, 'attack');
+        const attackClip = 'clip' in how ? standing.clips.find((clip) => clip.name === how.clip) : undefined;
+        idle = resting ? mixer.clipAction(resting) : null;
+        attack = attackClip ? mixer.clipAction(attackClip) : null;
+        idle?.play();
+        mixer.update(0);
+        mixer.addEventListener('finished', (event) => {
+          event.action.stop();
+          idle?.reset().play();
+        });
+        mixers.push(mixer);
+      }
+      walker = { holder, root: standing.root, bang, idle, attack, alerted: false, lunge: -1, turned: false };
     }
     if (contents.boss && slots.boss) {
       const look = creatureLook(contents.boss.id);
@@ -367,6 +413,40 @@ export function buildContentScene(
     },
     setQuestReady(ready) {
       if (mark) mark.visible = ready;
+    },
+    setMonster(w, dt) {
+      if (!walker) return;
+      walker.holder.position.set(w.x, 0, w.z);
+      // The model looks along +z; the wanderer's yaw 0 looks along -z. The turn is eased over about 0.3 s.
+      const wanted = w.yaw + Math.PI;
+      if (!walker.turned) {
+        walker.root.rotation.y = wanted;
+        walker.turned = true;
+      } else {
+        const off = Math.atan2(Math.sin(wanted - walker.root.rotation.y), Math.cos(wanted - walker.root.rotation.y));
+        walker.root.rotation.y += off * Math.min(1, dt * TURN_RATE);
+      }
+      const startled = w.noticed && w.noticedFor < NOTICE_SECONDS;
+      walker.bang.visible = startled;
+      if (startled && !walker.alerted) {
+        // Once per notice: the attack clip, or a lunge for a model without one.
+        if (walker.attack) {
+          walker.idle?.stop();
+          walker.attack.reset();
+          walker.attack.setLoop(THREE.LoopOnce, 1);
+          walker.attack.setDuration(Math.min(walker.attack.getClip().duration, NOTICE_SECONDS));
+          walker.attack.play();
+        } else {
+          walker.lunge = 0;
+        }
+      }
+      walker.alerted = w.noticed;
+      if (walker.lunge >= 0) {
+        walker.lunge += dt;
+        const p = Math.min(walker.lunge / LUNGE_SECONDS, 1);
+        walker.root.position.set(Math.sin(walker.root.rotation.y) * 0.4 * Math.sin(Math.PI * p), 0, Math.cos(walker.root.rotation.y) * 0.4 * Math.sin(Math.PI * p));
+        if (p >= 1) walker.lunge = -1;
+      }
     },
     dispose() {
       for (const mixer of mixers) mixer.stopAllAction();

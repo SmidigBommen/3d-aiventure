@@ -1,0 +1,9 @@
+{
+  "commit": "4fbc1f5",
+  "p95_ms": {
+    "town": 50.1,
+    "wilderness": 50,
+    "dungeon": 50.1,
+    "fight": 50.1
+  }
+}

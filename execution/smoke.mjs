@@ -18,6 +18,13 @@
 // fade, the arrival title), reads the compass and opens the journal. With --serve it also travels into Act 2,
 // is ambushed by Lady Vex on the road and wins, reads the journal with three shards, and fells Malachar to see
 // the ending, once after the fight and once from the journal.
+// Sound and feel, in both modes: nothing sounds before the first input (sound-locked), footsteps on stone, grass
+// and dungeon floor (sound-steps), the gate cue (sound-gate), the sound settings and the N key over reloads
+// (sound-settings, sound-kept), the card of a location on the way in (loading-card), the ambience per scene, and
+// the frame time of the reference scenes against execution/frame_baseline.json (measured by execution/frames.mjs;
+// a scene over its limit is an error). With --serve also: a monster that notices (feel-noticed), the cues of
+// every turn of a fight (sound-fight), a level-up (feel-levelup), the red edge at low hit points (feel-low-hp),
+// the coin of a purchase (sound-coin) and the frame time of a fight.
 // Loads the 3D client and the classic interface from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
 // failed request, HTTP status >= 400, a 3D view that renders nothing, a model that did not load,
@@ -33,6 +40,10 @@ import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SCENES, readBaseline, referenceScene, verdict } from './frames.mjs';
+// The pure modules of the client say which cues a turn has; the page is compared with them.
+import { resultSounds, turnSounds } from '../client/src/sound/cues.ts';
+import { buildTimeline } from '../client/src/battle/timeline.ts';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
 const campaign = JSON.parse(readFileSync(join(repo, 'json/campaign.json'), 'utf8'));
@@ -281,13 +292,18 @@ async function slotShot(kind, name) {
  * monster that is not the goal (walking into it would start the fight). Ends facing the slot.
  */
 async function walkTo(kind, range) {
-  const path = await page.evaluate(([k, r]) => {
-    const { layout, player, contents } = window.__aiv;
-    const goal = layout.slots[k];
+  // The monster wanders: `monster` as a goal is where it is now (`__aiv.monster`), and a way is planned anew
+  // when it has moved since the plan was made.
+  const plan = () => page.evaluate(([k, r]) => {
+    const { layout, player, contents, monster } = window.__aiv;
+    // `away`: to the nearest point at least `r` m from the monster, keeping clear of it on the way.
+    const away = k === 'away';
+    const goal = k === 'monster' || away ? monster : layout.slots[k];
+    if (!goal) return null;
     const boxes = [...layout.walls, ...layout.props];
     if ((contents?.event && !contents.event.landmark) || (contents?.spent && !contents.spent.landmark)) boxes.push({ ...layout.slots.event, halfX: 0.5, halfZ: 0.5 });
     if (contents?.boss && layout.slots.boss) boxes.push({ ...layout.slots.boss, halfX: 0.7, halfZ: 0.7 });
-    const avoid = contents?.monster && k !== 'monster' ? layout.slots.monster : null;
+    const avoid = monster && k !== 'monster' ? monster : null;
     const { halfX, halfZ } = layout.floor;
     const step = 0.25;
     const nx = Math.round((halfX * 2) / step) + 1;
@@ -304,7 +320,7 @@ async function walkTo(kind, range) {
     for (let head = 0; head < queue.length && end < 0; head++) {
       const cell = queue[head];
       const p = at(cell);
-      if (Math.hypot(p.x - goal.x, p.z - goal.z) <= r) end = cell;
+      if (away ? Math.hypot(p.x - goal.x, p.z - goal.z) >= r : Math.hypot(p.x - goal.x, p.z - goal.z) <= r) end = cell;
       for (const next of [cell - 1, cell + 1, cell - nx, cell + nx]) {
         if (next < 0 || next >= nx * nz || from.has(next) || Math.abs((next % nx) - (cell % nx)) > 1 || !free(at(next))) continue;
         from.set(next, cell);
@@ -314,30 +330,111 @@ async function walkTo(kind, range) {
     if (end < 0) return null;
     const cells = [];
     for (let cell = end; cell !== start; cell = from.get(cell)) cells.unshift(at(cell));
-    return cells.filter((_, i) => i % 2 === 1 || i === cells.length - 1);
+    return { cells: cells.filter((_, i) => i % 2 === 1 || i === cells.length - 1), foe: monster ? { x: monster.x, z: monster.z } : null };
   }, [kind, range]);
-  if (!path) throw new Error(`no way to the ${kind} slot`);
   await page.keyboard.down('KeyW');
-  for (const point of path) {
-    for (let tries = 0; ; tries++) {
-      const left = await page.evaluate((p) => {
-        const me = window.__aiv.player;
-        if (!me) return -1;
-        window.__aiv.lookAt(p.x, p.z);
-        return Math.hypot(p.x - me.x, p.z - me.z);
-      }, point);
-      if (left < 0) throw new Error(`left the world on the way to the ${kind} slot`);
-      if (left < 0.3) break;
-      if (tries > 400) throw new Error(`stuck on the way to the ${kind} slot`);
-      await page.waitForTimeout(16);
+  try {
+    for (let plans = 0; ; plans++) {
+      if (plans > 40) throw new Error(`the monster keeps moving on the way to the ${kind} slot`);
+      const made = await plan();
+      if (!made) throw new Error(`no way to the ${kind} slot`);
+      let moved = false;
+      for (const point of made.cells) {
+        for (let tries = 0; !moved; tries++) {
+          const seen = await page.evaluate(([p, foe]) => {
+            const me = window.__aiv.player;
+            if (!me) return { left: -1, moved: false };
+            window.__aiv.lookAt(p.x, p.z);
+            const now = window.__aiv.monster;
+            return { left: Math.hypot(p.x - me.x, p.z - me.z), moved: (foe === null) !== (now === null) || (!!foe && !!now && Math.hypot(now.x - foe.x, now.z - foe.z) > 0.5) };
+          }, [point, made.foe]);
+          if (seen.left < 0) throw new Error(`left the world on the way to the ${kind} slot`);
+          moved = seen.moved;
+          if (seen.left < 0.3) break;
+          if (tries > 400) throw new Error(`stuck on the way to the ${kind} slot`);
+          if (!moved) await page.waitForTimeout(16);
+        }
+        if (moved) break;
+      }
+      if (!moved) break;
     }
+  } finally {
+    await page.keyboard.up('KeyW');
   }
-  await page.keyboard.up('KeyW');
   await page.evaluate((k) => {
-    const slot = window.__aiv.layout.slots[k];
-    window.__aiv.lookAt(slot.x, slot.z);
+    const goal = k === 'monster' || k === 'away' ? window.__aiv.monster : window.__aiv.layout.slots[k];
+    if (goal) window.__aiv.lookAt(goal.x, goal.z);
   }, kind);
   await page.waitForTimeout(100);
+}
+
+/** What the page has recorded of its sound: `count` cues so far. */
+const soundNow = () => page.evaluate(() => window.__aiv.sound);
+/** The cues requested since `count` cues had been (the log keeps the last 500). */
+const cuesSince = (count) => page.evaluate((n) => {
+  const { cues, count: now } = window.__aiv.sound;
+  return cues.slice(Math.max(0, cues.length - (now - n)));
+}, count);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Checks the ambience the page reports. */
+async function ambienceIs(expected, name) {
+  const heard = (await soundNow()).ambience;
+  if (!same(heard, expected)) errors.push(`${name}: the ambience is ${JSON.stringify(heard)}, expected ${JSON.stringify(expected)}`);
+}
+
+/**
+ * Walks from where the player stands towards the gate furthest away until a footstep is recorded, and
+ * checks that it is `cue`. Stops 4 m before the gate at the latest.
+ */
+async function stepIs(cue, name) {
+  const before = (await soundNow()).count;
+  const gate = await page.evaluate(() => {
+    const me = window.__aiv.player;
+    const far = window.__aiv.layout.gates.reduce((a, b) => (Math.hypot(b.x - me.x, b.z - me.z) > Math.hypot(a.x - me.x, a.z - me.z) ? b : a));
+    window.__aiv.lookAt(far.x, far.z);
+    return { x: far.x, z: far.z };
+  });
+  await page.keyboard.down('KeyW');
+  await page.waitForFunction(([n, g]) => {
+    const me = window.__aiv.player;
+    const { cues, count } = window.__aiv.sound;
+    return !me || Math.hypot(g.x - me.x, g.z - me.z) < 4 || cues.slice(Math.max(0, cues.length - (count - n))).some((made) => made.startsWith('step_'));
+  }, [before, gate], { timeout: 10000 }).catch(() => {});
+  await page.keyboard.up('KeyW');
+  const steps = (await cuesSince(before)).filter((made) => made.startsWith('step_'));
+  if (steps.length < 1 || steps.some((made) => made !== cue)) errors.push(`${name}: the footsteps are ${JSON.stringify(steps)}, expected ${cue}`);
+}
+
+/**
+ * After a key that plays a turn was pressed (`before`: the cue count and the turn's seq at the press): waits
+ * for the turn to be over and checks that the cues added are those of `turnSounds` for its events, followed by
+ * those of the result when the fight ended. Returns the view.
+ */
+async function turnHeard(before, name) {
+  await page.waitForFunction((n) => window.__aiv.battle !== null && window.__aiv.battle.view.turn.seq !== n && !window.__aiv.battle.playing, before.seq, { timeout: 30000 });
+  const view = await page.evaluate(() => window.__aiv.battle.view);
+  const finale = view.phase === 'victory' ? 'victory' : view.phase === 'defeat' ? 'defeat' : null;
+  const timeline = buildTimeline(view.turn.events, { player: view.player.hp, monster: view.monster.hp }, finale);
+  const expected = [...turnSounds(view.turn.events, timeline).map((made) => made.cue), ...(finale ? resultSounds(view) : [])];
+  await page.waitForFunction((n) => window.__aiv.sound.count >= n, before.count + expected.length, { timeout: 10000 }).catch(() => {});
+  const heard = await cuesSince(before.count);
+  if (!same(heard, expected)) errors.push(`${name}: turn ${view.turn.seq} sounded ${JSON.stringify(heard)}, turnSounds gives ${JSON.stringify(expected)}`);
+  return view;
+}
+
+/** Presses `key` each time the fight takes one, checking the cues of every turn, until the fight is won. Returns the last view. */
+async function fightHeard(key, name) {
+  for (let turns = 0; turns < 200; turns++) {
+    await untilOpen();
+    const now = await page.evaluate(() => (window.__aiv.battle ? { result: window.__aiv.battle.result, count: window.__aiv.sound.count, seq: window.__aiv.battle.view.turn.seq, view: window.__aiv.battle.view } : null));
+    if (!now) throw new Error(`${name}: the fight is over without a result`);
+    if (now.result === 'victory') return now.view;
+    if (now.result !== null) throw new Error(`${name}: the fight ended in ${now.result}`);
+    await page.keyboard.press(key);
+    await turnHeard(now, name);
+  }
+  throw new Error(`${name}: the fight did not end`);
 }
 
 /** Checks the prompt, in the page's report and on screen, and saves the screenshot. */
@@ -354,12 +451,18 @@ async function promptShot(text, name) {
  * shown, the mouse free, the player 1.5 to 2.5 m from the monster. Returns the battle stance.
  */
 async function startFight(name) {
+  // The fight stands where the monster was met, which is not its slot any more.
+  const foe = await page.evaluate(() => window.__aiv.monster);
+  if (!foe) throw new Error(`${name}: there is no monster to fight`);
   await page.keyboard.press('KeyE');
   await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle !== null && !document.getElementById('battle-panel').hidden, null, { timeout: 30000 });
-  const seen = await page.evaluate(() => ({
-    path: window.location.pathname, player: window.__aiv.player, slot: window.__aiv.layout.slots.monster, locked: document.pointerLockElement !== null,
-    interaction: window.__aiv.interaction, prompt: window.__aiv.prompt, menu: window.__aiv.menuOpen,
-  }));
+  const seen = await page.evaluate((slot) => ({
+    path: window.location.pathname, player: window.__aiv.player, slot, locked: document.pointerLockElement !== null,
+    interaction: window.__aiv.interaction, prompt: window.__aiv.prompt, menu: window.__aiv.menuOpen, monster: window.__aiv.monster,
+    home: window.__aiv.layout.slots.monster,
+  }), foe);
+  if (seen.monster !== null) errors.push(`${name}: __aiv.monster is ${JSON.stringify(seen.monster)} during the fight`);
+  if (!seen.home) errors.push(`${name}: the layout has lost the monster's home slot`);
   const distance = Math.hypot(seen.player.x - seen.slot.x, seen.player.z - seen.slot.z);
   if (seen.path !== '/') errors.push(`${name}: the fight left / for ${seen.path}`);
   if (seen.locked) errors.push(`${name}: the pointer is still locked`);
@@ -720,13 +823,43 @@ async function settingsSteps() {
   if ((await page.evaluate(() => localStorage.getItem('aiv.settings'))) !== changed) errors.push('settings: the change is not in localStorage');
   await page.waitForTimeout(200);
   await shot('settings');
+
+  // The sound: two sliders and the mute box, in use at once and kept in the browser.
+  const soundSet = async () => JSON.stringify((await soundNow()).settings);
+  const quiet = JSON.stringify({ effects: 0.3, ambience: 0.2, muted: false });
+  const muted = JSON.stringify({ effects: 0.3, ambience: 0.2, muted: true });
+  if ((await soundSet()) !== JSON.stringify({ effects: 0.8, ambience: 0.5, muted: false })) errors.push(`sound-settings: they start as ${await soundSet()}`);
+  if (await page.isChecked('#settings-mute')) errors.push('sound-settings: the mute box starts checked');
+  const heardBefore = (await soundNow()).count;
+  await page.fill('#settings-effects', '0.3');
+  await page.fill('#settings-ambience', '0.2');
+  if ((await soundSet()) !== quiet) errors.push(`sound-settings: after the change they are ${await soundSet()}`);
+  if ((await page.evaluate(() => localStorage.getItem('aiv.sound'))) !== quiet) errors.push(`sound-settings: localStorage holds ${await page.evaluate(() => localStorage.getItem('aiv.sound'))}`);
+  if (!(await cuesSince(heardBefore)).includes('click')) errors.push('sound-settings: a change of the sliders did not click');
+  await shot('sound-settings');
   await page.keyboard.press('Escape');
   await page.waitForFunction(() => !window.__aiv.settingsOpen && !document.getElementById('menu').hidden && window.__aiv.menuOpen, null, { timeout: 5000 })
     .catch(() => errors.push('settings: Esc does not lead back to the menu'));
 
-  await page.reload({ waitUntil: 'load', timeout: 30000 });
-  await page.waitForFunction(() => window.__aiv && window.__aiv.ready, null, { timeout: 30000 });
+  const reload = async () => {
+    await page.reload({ waitUntil: 'load', timeout: 30000 });
+    await page.waitForFunction(() => window.__aiv && window.__aiv.ready, null, { timeout: 30000 });
+  };
+  await reload();
   if ((await settingsNow()) !== changed) errors.push(`settings: after a reload they are ${await settingsNow()}`);
+  if ((await soundSet()) !== quiet) errors.push(`sound-kept: after a reload the sound settings are ${await soundSet()}`);
+  if (await page.isVisible('#hud-mute')) errors.push('sound-kept: "Muted" shows without mute');
+  // N mutes on every screen, here on the title screen; it is kept over a reload, and N again clears it.
+  await page.keyboard.press('KeyN');
+  if ((await soundSet()) !== muted || !(await page.isVisible('#hud-mute'))) errors.push(`sound-kept: after N the sound settings are ${await soundSet()}, #hud-mute shown ${await page.isVisible('#hud-mute')}`);
+  await reload();
+  if ((await soundSet()) !== muted || !(await page.isVisible('#hud-mute'))) errors.push(`sound-kept: after N and a reload the sound settings are ${await soundSet()}, #hud-mute shown ${await page.isVisible('#hud-mute')}`);
+  if ((await page.textContent('#hud-mute')) !== 'Muted (N)') errors.push(`sound-kept: #hud-mute reads "${await page.textContent('#hud-mute')}"`);
+  await page.waitForTimeout(300);
+  await shot('sound-kept');
+  await page.keyboard.press('KeyN');
+  if ((await soundSet()) !== quiet || (await page.isVisible('#hud-mute'))) errors.push(`sound-kept: after N again the sound settings are ${await soundSet()}`);
+  if ((await page.evaluate(() => localStorage.getItem('aiv.sound'))) !== quiet) errors.push('sound-kept: unmuting is not in localStorage');
   await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
   await enterWorld();
 
@@ -736,6 +869,9 @@ async function settingsSteps() {
   await page.waitForFunction(() => window.__aiv.settingsOpen, null, { timeout: 5000 });
   await page.fill('#set-fov', '70');
   await page.uncheck('#set-invert-y');
+  await page.fill('#settings-effects', '0.8');
+  await page.fill('#settings-ambience', '0.5');
+  if (JSON.stringify((await soundNow()).settings) !== JSON.stringify({ effects: 0.8, ambience: 0.5, muted: false })) errors.push('sound-settings: the defaults are not back');
   await page.click('#settings-close');
   await page.click('#menu-back');
   await page.waitForFunction(() => !window.__aiv.menuOpen, null, { timeout: 5000 });
@@ -923,6 +1059,11 @@ try {
   await page.waitForTimeout(500);
   const variety = await canvasVariety();
   await shot('title-new');
+  // Nothing sounds before the first input of the page, and the title screen has no ambience.
+  const silent = await soundNow();
+  if (silent.unlocked !== false || silent.count !== 0 || silent.cues.length !== 0 || silent.ambience !== null) errors.push(`sound-locked: before any input the page reports ${JSON.stringify(silent)}`);
+  if ((await page.evaluate(() => window.__aiv.vignette)) !== 0) errors.push('sound-locked: the red edge shows on the title screen');
+  await shot('sound-locked');
   if (await page.locator('#btn-new-game').evaluate((b) => b.tagName !== 'BUTTON' || b.hasAttribute('href'))) errors.push('New game is not a button');
   if (serve && (await page.isVisible('#btn-load-game'))) errors.push('Load game is offered without a save');
   if (variety < 0.05) errors.push(`the 3D view is blank: only ${(variety * 100).toFixed(1)}% of sampled pixels differ from the background`);
@@ -948,6 +1089,46 @@ try {
   await page.waitForFunction((from) => window.__aiv.player && Math.hypot(window.__aiv.player.x - from.x, window.__aiv.player.z - from.z) > 0.5, begun.player, { timeout: 10000 })
     .catch(() => errors.push('after the opening the player does not walk'));
   await page.keyboard.up('KeyW');
+
+  // 4·. Footsteps: W held for 3 s on the square, to and fro between the spawn and a point towards the furthest
+  // gate, gives stone steps and nothing else; standing still, no further step comes.
+  {
+    const unlocked = await soundNow();
+    if (!unlocked.unlocked || unlocked.count < 1) errors.push(`sound-steps: after clicks and keys the page reports ${JSON.stringify({ unlocked: unlocked.unlocked, count: unlocked.count })}`);
+    await ambienceIs({ bed: 'town', tense: false }, 'sound-steps');
+    await page.waitForTimeout(400);
+    const ends = await page.evaluate(() => {
+      const me = window.__aiv.player;
+      const far = window.__aiv.layout.gates.reduce((a, b) => (Math.hypot(b.x - me.x, b.z - me.z) > Math.hypot(a.x - me.x, a.z - me.z) ? b : a));
+      const d = Math.hypot(far.x - me.x, far.z - me.z);
+      const reach = Math.max(1.5, Math.min(6, d - 5));
+      return [{ x: me.x + ((far.x - me.x) / d) * reach, z: me.z + ((far.z - me.z) / d) * reach }, { x: me.x, z: me.z }];
+    });
+    const before = (await soundNow()).count;
+    const started = Date.now();
+    await page.keyboard.down('KeyW');
+    for (let leg = 0; Date.now() - started < 3000; leg++) {
+      const to = ends[leg % 2];
+      while (Date.now() - started < 3000) {
+        const left = await page.evaluate((p) => {
+          window.__aiv.lookAt(p.x, p.z);
+          return Math.hypot(p.x - window.__aiv.player.x, p.z - window.__aiv.player.z);
+        }, to);
+        if (left < 0.5) break;
+        await page.waitForTimeout(16);
+      }
+    }
+    await page.keyboard.up('KeyW');
+    await page.waitForTimeout(500);
+    const walked = await cuesSince(before);
+    const stone = walked.filter((made) => made === 'step_stone').length;
+    const other = walked.filter((made) => !['step_stone', 'prompt', 'notice'].includes(made));
+    if (stone < 4 || other.length) errors.push(`sound-steps: 3 s of walking on the square sounded ${JSON.stringify(walked)}`);
+    await page.waitForTimeout(700);
+    const standing = (await cuesSince(before)).filter((made) => made.startsWith('step_')).length;
+    if (standing !== stone) errors.push(`sound-steps: ${standing - stone} more footsteps while standing still`);
+    await worldShot('sound-steps');
+  }
 
   // 4a. Settings, save, load, delete and quit, all from the menu.
   await settingsSteps();
@@ -1036,7 +1217,21 @@ try {
     await shot('travel-fade');
     await page.keyboard.up('KeyW');
     wake();
+    // The card of the location travelled to, while its first area loads.
+    const woodsText = campaign.acts.flatMap((act) => act.locations).find((loc) => loc.name === 'Whispering Woods').description;
+    await page.waitForFunction(() => window.__aiv.loadingCard !== null, null, { timeout: 30000 }).catch(() => errors.push('loading-card: no card on the way to the Whispering Woods'));
+    const onCard = await page.evaluate(() => ({
+      card: window.__aiv.loadingCard, loading: window.__aiv.loading, shown: !document.getElementById('loading').hidden,
+      title: document.getElementById('loading-title').hidden ? null : document.getElementById('loading-title').textContent,
+      text: document.getElementById('loading-text').textContent,
+    }));
+    if (!same(onCard.card, { title: 'Whispering Woods', text: woodsText }) || !onCard.loading || !onCard.shown || onCard.title !== 'Whispering Woods' || onCard.text !== woodsText) {
+      errors.push(`loading-card: ${JSON.stringify(onCard)}`);
+    }
+    await shot('loading-card');
     await arrived('Whispering Woods', 'entrance', 1, 'arrival-act1');
+    if (await page.evaluate(() => window.__aiv.loadingCard !== null)) errors.push('loading-card: the card stays after the arrival');
+    await ambienceIs({ bed: 'wilderness', tense: false }, 'arrival-act1');
     await page.unroute('**/api/travel');
   }
 
@@ -1125,6 +1320,7 @@ try {
     await kept;
     await route.continue();
   });
+  const beforeGate = (await soundNow()).count;
   await page.keyboard.down('KeyW');
   await page.waitForFunction(() => window.__aiv.loading === true, null, { timeout: 60000 });
   const between = await page.evaluate(() => ({
@@ -1134,6 +1330,14 @@ try {
   if (between.player !== null || between.layout !== null || between.dressing !== null || between.screen !== 'world' || !between.indicator) {
     errors.push(`between two areas: ${JSON.stringify(between).slice(0, 300)}`);
   }
+  // The gate sounds when the move is sent, and a gate inside a location shows the plain text, never a card.
+  const atGate = await page.evaluate(() => ({
+    card: window.__aiv.loadingCard, title: !document.getElementById('loading-title').hidden, text: document.getElementById('loading-text').textContent,
+  }));
+  const gateCues = await cuesSince(beforeGate);
+  if (gateCues.filter((made) => made === 'gate').length !== 1 || gateCues.some((made) => !['gate', 'step_stone', 'prompt', 'notice'].includes(made))) errors.push(`sound-gate: walking through the gate sounded ${JSON.stringify(gateCues)}`);
+  if (atGate.card !== null || atGate.title || atGate.text !== 'Loading the area…') errors.push(`sound-gate: the loading indicator of a gate: ${JSON.stringify(atGate)}`);
+  await shot('sound-gate');
   letGo();
   await page.waitForFunction((id) => window.__aiv.state.area.id === id && window.__aiv.screen === 'world' && !window.__aiv.loading, gate.exitId, { timeout: 60000 });
   await page.keyboard.up('KeyW');
@@ -1180,10 +1384,13 @@ try {
   await page.waitForSelector('#loading', { state: 'visible', timeout: 10000 });
   const waiting = await page.evaluate(() => ({
     loading: window.__aiv.loading, screen: window.__aiv.screen, player: window.__aiv.player, layout: window.__aiv.layout,
-    text: document.getElementById('loading').textContent,
+    title: document.getElementById('loading-title').hidden ? null : document.getElementById('loading-title').textContent,
+    text: document.getElementById('loading-text').textContent, card: window.__aiv.loadingCard,
   }));
   if (waiting.loading !== true || waiting.screen !== 'title' || waiting.player !== null || waiting.layout !== null) errors.push(`while loading: ${JSON.stringify(waiting)}`);
-  if (waiting.text !== 'Loading the area…') errors.push(`the loading indicator says "${waiting.text}"`);
+  // The first area entered after a page load is one of another location than the last (none): the card of Rivermeet.
+  const townText = campaign.acts.flatMap((act) => act.locations).find((loc) => loc.name === 'Rivermeet Town').description;
+  if (waiting.title !== 'Rivermeet Town' || waiting.text !== townText || !same(waiting.card, { title: 'Rivermeet Town', text: townText })) errors.push(`the loading indicator says ${JSON.stringify([waiting.title, waiting.text, waiting.card])}`);
   await shot('loading');
   release();
   await page.waitForFunction(inWorld, null, { timeout: 60000 });
@@ -1201,25 +1408,75 @@ try {
   await worldShot('loc-whispering-woods');
 
   // 13. What an area holds: a monster, an event object and the search spot, met and come back from.
-  const encounters = ['content-monster', 'prompt-monster', 'battle-start', 'battle-turn', 'battle-victory', 'battle-after', 'content-monster-gone',
-    'battle-ability', 'battle-item', 'battle-flee', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'event-panel', 'event-reload',
+  const encounters = ['content-monster', 'feel-noticed', 'prompt-monster', 'battle-start', 'battle-turn', 'sound-fight', 'battle-victory', 'battle-after', 'content-monster-gone',
+    'battle-ability', 'battle-item', 'feel-levelup', 'battle-flee', 'feel-low-hp', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'event-panel', 'event-reload',
     'event-success', 'event-spent', 'event-failure', 'event-fight-result', 'event-fight', 'content-event-gone', 'prompt-search', 'after-search'];
   if (serve) {
     await slotShot('monster', 'content-monster');
     const met = await page.evaluate(() => window.__aiv.contents?.monster ?? null);
     if (met?.id !== GOBLIN.id || met.name !== GOBLIN.name || met.race !== 'Goblin' || met.level !== 1) errors.push(`the planted goblin is shown as ${JSON.stringify(met)}`);
+
+    // 13·. The goblin wanders around its slot until the player comes within 8 m; then it stands and faces them.
+    {
+      const far = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+      const first = await page.evaluate(() => ({ monster: window.__aiv.monster, home: window.__aiv.layout.slots.monster, player: window.__aiv.player, count: window.__aiv.sound.count }));
+      if (!first.monster) throw new Error('feel-noticed: __aiv.monster is null with a monster in the area');
+      if (far(first.monster, first.home) > 4 + 1e-6) errors.push(`feel-noticed: the monster is ${far(first.monster, first.home).toFixed(2)} m from its slot`);
+      if (first.monster.noticed && far(first.monster, first.player) > 10) errors.push(`feel-noticed: noticed from ${far(first.monster, first.player).toFixed(2)} m`);
+      if (first.monster.noticed) {
+        // It stands within 8 m of where one arrives: more than 10 m away it forgets the player.
+        await walkTo('away', 10.5).catch((e) => errors.push(`feel-noticed: no place in the area is 10.5 m from the monster (${e.message})`));
+      }
+      // Nobody near: it leaves the place it stood at within a few of its periods.
+      const left = await page.evaluate(() => window.__aiv.monster);
+      if (left?.noticed) errors.push(`feel-noticed: the monster still notices from afar: ${JSON.stringify(left)}`);
+      await page.waitForFunction((from) => {
+        const m = window.__aiv.monster;
+        return m && !m.noticed && Math.hypot(m.x - from.x, m.z - from.z) > 0.3;
+      }, left, { timeout: 30000 }).catch(() => errors.push('feel-noticed: the monster does not wander'));
+      const roaming = await page.evaluate(() => ({ monster: window.__aiv.monster, home: window.__aiv.layout.slots.monster }));
+      if (far(roaming.monster, roaming.home) > 4 + 1e-6) errors.push(`feel-noticed: the monster wandered ${far(roaming.monster, roaming.home).toFixed(2)} m from its slot`);
+      // Towards it, a step at a time, until it notices; the "!" shows for the first 0.8 s only.
+      const noticesBefore = await page.evaluate(() => window.__aiv.sound.cues.filter((made) => made === 'notice').length);
+      await page.keyboard.down('KeyW');
+      await page.waitForFunction(() => {
+        const m = window.__aiv.monster;
+        if (!m) return true;
+        window.__aiv.lookAt(m.x, m.z);
+        return m.noticed;
+      }, null, { timeout: 30000, polling: 16 }).catch(() => errors.push('feel-noticed: the monster did not notice the player walking up to it'));
+      await page.keyboard.up('KeyW');
+      await shot('feel-noticed');
+      const seen = await page.evaluate(() => {
+        const m = window.__aiv.monster;
+        window.__aiv.lookAt(m.x, m.z);
+        return { monster: m, player: window.__aiv.player };
+      });
+      const apart = far(seen.monster, seen.player);
+      const facing = Math.atan2(-(seen.player.x - seen.monster.x), -(seen.player.z - seen.monster.z));
+      if (!seen.monster.noticed || apart > 8.5) errors.push(`feel-noticed: ${JSON.stringify(seen.monster)} with the player ${apart.toFixed(2)} m away`);
+      if (Math.cos(facing - seen.monster.yaw) < 0.99) errors.push(`feel-noticed: the monster's yaw is ${seen.monster.yaw}, the player is at ${facing}`);
+      const heard = await page.evaluate(() => window.__aiv.sound.cues.filter((made) => made === 'notice').length);
+      if (heard !== noticesBefore + 1) errors.push(`feel-noticed: ${heard - noticesBefore} notice cues for one notice`);
+      await page.waitForTimeout(1000);
+      const later = await page.evaluate(() => window.__aiv.monster);
+      if (!later?.noticed || later.x !== seen.monster.x || later.z !== seen.monster.z) errors.push(`feel-noticed: 1 s later the monster is ${JSON.stringify(later)}, it stood at ${JSON.stringify(seen.monster)}`);
+      if (await page.evaluate(() => window.__aiv.layout.slots.monster.x !== window.__aiv.dressing.layout.slots.monster.x)) errors.push('feel-noticed: layout.slots.monster is not the home slot');
+    }
     await walkTo('monster', 2.6);
     await promptShot('E: fight Grak the Goblin', 'prompt-monster');
 
     // 13a. The fight starts where the monster stands: no navigation, the panel over the view.
     let stance = await startFight('battle-start');
     await untilOpen();
+    await ambienceIs({ bed: 'wilderness', tense: true }, 'battle-start');
     await shot('battle-start');
 
     // 13b. A turn is played; while it is, keys send nothing.
     const sent = [];
     const count = (request) => request.method() === 'POST' && request.url().includes('/api/battle/') && sent.push(request.url());
     page.on('request', count);
+    const firstTurn = await page.evaluate(() => ({ count: window.__aiv.sound.count, seq: window.__aiv.battle.view.turn.seq }));
     await page.keyboard.press('KeyA');
     await page.waitForFunction(() => window.__aiv.battle?.playing === true, null, { timeout: 30000 })
       .catch(() => errors.push('battle-turn: no turn was played after A'));
@@ -1229,9 +1486,15 @@ try {
     await page.waitForTimeout(150);
     if (sent.length !== 1) errors.push(`battle-turn: ${sent.length} requests were sent, expected the one attack: ${sent.join(', ')}`);
     page.off('request', count);
+    // The turn sounded as turnSounds says, cue for cue; the keys pressed meanwhile added nothing.
+    await turnHeard(firstTurn, 'sound-fight');
+    await shot('sound-fight');
 
-    // 13c. Attacks until the goblin falls: the result panel with the rewards.
-    await fightUntil('KeyA', 'victory', 'battle-victory');
+    // 13c. Attacks until the goblin falls, every turn with its cues: the result panel with the rewards.
+    const wonView = await fightHeard('KeyA', 'sound-fight');
+    await page.waitForSelector('#battle-result', { state: 'visible', timeout: 5000 });
+    await page.waitForFunction(() => window.__aiv.sound.cues.includes('victory'), null, { timeout: 5000 }).catch(() => errors.push('sound-fight: the victory did not sound'));
+    if (!resultSounds(wonView).includes('victory')) errors.push('sound-fight: resultSounds has no victory for the view of the victory');
     const won = await page.textContent('#battle-result');
     if (!/\+\d+ XP/.test(won) || !/\+\d+ gold/.test(won)) errors.push(`battle-victory: the result panel shows no XP and gold: "${won}"`);
     await shot('battle-victory');
@@ -1251,8 +1514,11 @@ try {
     await worldShot('content-monster-gone');
 
     // 13e. A second fight, against something that lasts, with a potion: an ability, then an item, then the win.
+    // The character is one experience point short of its next level, so this victory levels it up.
+    const short = await page.evaluate(() => window.__aiv.state.character.xp_to_next_level - 1);
     plant(ORC, null, (session) => {
       session.character.inventory.push({ name: 'Healing Potion', description: '', type: 'potion', healing_amount: 10 });
+      session.character.xp = short;
     });
     await openTitle();
     await enterWorld();
@@ -1272,7 +1538,20 @@ try {
     }
     const potionsLeft = await page.evaluate(() => (window.__aiv.battle?.view.items ?? []).reduce((sum, stack) => sum + stack.count, 0));
     if (potionsLeft !== potions - 1) errors.push(`battle-item: ${potionsLeft} potions left of ${potions}`);
-    await fightUntil('KeyA', 'victory', 'battle-item');
+    const levelBefore = await page.evaluate(() => window.__aiv.state.character.level);
+    const upView = await fightHeard('KeyA', 'feel-levelup');
+    await page.waitForSelector('#battle-result', { state: 'visible', timeout: 5000 });
+    // The level-up: the flourish in the result panel, and its cue after the victory's.
+    const flourish = await page.evaluate(() => {
+      const node = document.getElementById('battle-levelup');
+      return node ? { text: node.textContent, cls: node.className, shown: !node.hidden && node.getClientRects().length > 0 } : null;
+    });
+    const newLevel = upView.rewards?.new_level ?? levelBefore + 1;
+    if (!upView.rewards?.leveled_up) errors.push(`feel-levelup: the victory did not level up: ${JSON.stringify(upView.rewards)}`);
+    if (!flourish || !flourish.shown || flourish.cls !== 'levelup-flourish' || flourish.text !== `Level ${newLevel}!`) errors.push(`feel-levelup: #battle-levelup is ${JSON.stringify(flourish)}, expected "Level ${newLevel}!"`);
+    const closing = (await soundNow()).cues.slice(-2);
+    if (!same(closing, ['victory', 'levelup'])) errors.push(`feel-levelup: the last cues are ${JSON.stringify(closing)}`);
+    await shot('feel-levelup');
     await page.keyboard.press('Enter');
     await backToWalking(stance, 'battle-item');
 
@@ -1298,7 +1577,12 @@ try {
       session.character.current_hit_points = 1;
     });
     await openTitle();
+    if ((await page.evaluate(() => window.__aiv.vignette)) !== 0) errors.push('feel-low-hp: the red edge shows on the title screen');
     await enterWorld();
+    // One hit point of 9999: the red edge is nearly at its full strength.
+    const lowHp = await page.evaluate(() => ({ edge: window.__aiv.vignette, shown: Number(getComputedStyle(document.getElementById('vignette')).opacity) }));
+    if (!(lowHp.edge > 0.5 && lowHp.edge <= 1) || Math.abs(lowHp.shown - lowHp.edge) > 0.01) errors.push(`feel-low-hp: at 1 hit point of 9999: ${JSON.stringify(lowHp)}`);
+    await worldShot('feel-low-hp');
     await walkTo('monster', 2.6);
     await startFight('battle-defeat');
     await fightUntil('KeyD', 'defeat', 'battle-defeat');
@@ -1312,6 +1596,9 @@ try {
       errors.push(`battle-revived: ${JSON.stringify(risen).slice(0, 300)}`);
     }
     if (await page.isVisible('#battle-panel')) errors.push('battle-revived: the battle panel is still shown');
+    const fullHp = await page.evaluate(() => ({ edge: window.__aiv.vignette, shown: Number(getComputedStyle(document.getElementById('vignette')).opacity) }));
+    if (fullHp.edge !== 0 || fullHp.shown !== 0) errors.push(`feel-low-hp: at full hit points: ${JSON.stringify(fullHp)}`);
+    if (!(await soundNow()).cues.slice(-3).includes('heal')) errors.push('battle-revived: Rise Again did not sound');
     await worldShot('battle-revived');
 
     // 13h. A reload in the middle of a fight: the panel is back without the title screen, and nothing is played again.
@@ -1594,6 +1881,37 @@ try {
     console.log('skipped without --serve (the fight cannot be fixed): boss-intro, boss-fight, boss-enraged, boss-defeat-scene');
   }
 
+  // 14·. Frame time of the reference scenes (execution/frames.mjs measures; the baseline is in
+  // execution/frame_baseline.json), the ambience of each, and the footsteps of grass and dungeon floor.
+  {
+    const baseline = readBaseline();
+    if (!baseline) errors.push('frame time: execution/frame_baseline.json is missing or unreadable');
+    const steps = { town: 'step_stone', wilderness: 'step_grass', dungeon: 'step_dungeon' };
+    for (const scene of Object.keys(SCENES)) {
+      const measured = await referenceScene(page, url, scene, serve ? (monster) => plant(monster, null) : null);
+      if (!measured) {
+        console.log(`frame time ${scene}: skipped without --serve (no monster can be planted)`);
+        continue;
+      }
+      const judged = verdict(scene, measured.p95, baseline);
+      console.log(judged.line);
+      if (!judged.ok) errors.push(judged.line);
+      if (scene === 'fight') {
+        await ambienceIs({ bed: 'wilderness', tense: true }, 'frame time fight');
+        await shot('frames-fight');
+        // The fight of the measurement is fought to its end.
+        await fightUntil('KeyA', 'victory', 'frame time fight');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(inWorld, null, { timeout: 30000 });
+        await ambienceIs({ bed: 'wilderness', tense: false }, 'after the fight of the frame time');
+      } else {
+        await ambienceIs({ bed: scene, tense: false }, `frame time ${scene}`);
+        await stepIs(steps[scene], `sound-steps (${scene})`);
+        await worldShot(`frames-${scene}`);
+      }
+    }
+  }
+
   // 15. The rest of Act 1.
   if (serve) defeatEveryBoss();
   await travelAndEnter('Abandoned Watchtower', 'loc-abandoned-watchtower');
@@ -1870,8 +2188,11 @@ try {
 
     // 3. Two potions bought, one at the haggled price.
     const greater = await page.evaluate(() => window.__aiv.shop.view.wares[2]);
+    const beforeCoin = (await soundNow()).count;
     await page.click('#shop-wares [data-action="buy"][data-index="1"]');
     await said(`Purchased ${cheap.name} for ${cheap.effective_price} gold!`, 'shop-bought');
+    if (!same(await cuesSince(beforeCoin), ['coin'])) errors.push(`sound-coin: the purchase sounded ${JSON.stringify(await cuesSince(beforeCoin))}`);
+    await shot('sound-coin');
     await page.click('#shop-wares [data-action="buy"][data-index="2"]');
     await said(`Purchased ${greater.name} for ${greater.effective_price} gold!`, 'shop-bought');
     const left = 200 - cheap.effective_price - greater.effective_price;
@@ -1941,6 +2262,22 @@ try {
     if (new URL(page.url()).pathname !== '/') errors.push(`the shop and the quests left / for ${page.url()}`);
   } else {
     console.log(`skipped without --serve (the session cannot be edited): ${shopSteps.join(', ')}`);
+    // The coin of a purchase, when the character as it is can pay for one of the wares.
+    await openShop(null);
+    const offer = await page.evaluate(() => {
+      const gold = window.__aiv.state.character.gold;
+      return window.__aiv.shop.view.wares.filter((ware) => ware.quantity > 0 && ware.effective_price <= gold).sort((a, b) => a.effective_price - b.effective_price)[0] ?? null;
+    });
+    if (offer) {
+      const beforeCoin = (await soundNow()).count;
+      await page.click(`#shop-wares [data-action="buy"][data-index="${offer.index}"]`);
+      await page.waitForFunction((n) => window.__aiv.sound.count > n, beforeCoin, { timeout: 10000 }).catch(() => {});
+      if (!same(await cuesSince(beforeCoin), ['coin'])) errors.push(`sound-coin: the purchase sounded ${JSON.stringify(await cuesSince(beforeCoin))}`);
+      await shot('sound-coin');
+    } else {
+      console.log('skipped (the character cannot afford anything at Elara\'s): sound-coin');
+    }
+    await closeShop('sound-coin');
   }
 
   // 16c. Travel into Act 2, Lady Vex's ambush on the road, the journal with three shards, and the ending.

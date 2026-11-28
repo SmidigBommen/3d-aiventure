@@ -1,7 +1,7 @@
 // The HTML panel of a fight: both plates, the action buttons, the log, the banner, the texts that
 // float, the flash of an effect on the player, and the result. It shows the view it is given.
 
-import { flashPlace, type FxLook } from './fx';
+import { FLOAT_LOOKS, flashPlace, type FxLook } from './fx';
 import type { FloatStyle, Side } from './timeline';
 import { ENRAGE_BANNER_SECONDS, victoryLines, type VictoryLine } from './boss';
 import type { BattleAction, BattleEffect, BattleView } from './view';
@@ -157,6 +157,9 @@ export function showEnrage(text: string | null): void {
 export function floatText(side: Side, text: string, style: FloatStyle, at: { x: number; y: number } | null): void {
   const layer = el('battle-floats');
   const node = h('div', `float-number float-${style}`, text);
+  const look = FLOAT_LOOKS[style];
+  node.style.color = look.color;
+  node.style.fontSize = `${look.size}rem`;
   let x = window.innerWidth / 2;
   let y = window.innerHeight * 0.3;
   if (side === 'player') {
@@ -200,8 +203,12 @@ export function showResult(view: BattleView): void {
     proceed.type = 'button';
     proceed.id = 'battle-continue';
     panel.className = 'panel result-victory';
+    // The flourish of a level gained: its number, large and gold, bursting in.
+    const flourish = rewards?.leveled_up ? h('div', 'levelup-flourish', `Level ${rewards.new_level}!`) : null;
+    if (flourish) flourish.id = 'battle-levelup';
     panel.replaceChildren(
       h('h2', '', 'Victory'),
+      ...(flourish ? [flourish] : []),
       h('p', 'result-line', `You have defeated ${view.monster.name}!`),
       // The defeat scene of a boss: its last moment first, then what was won, then what that opens.
       ...lines.filter((made) => made.kind === 'defeat').map(line),
