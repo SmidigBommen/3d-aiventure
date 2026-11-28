@@ -561,8 +561,43 @@ const pick = (value) => page.click(`#creation-body [data-value="${value}"]`);
 /** New game on the title screen, the eight creation steps for Human Fighter "Smoke", and Begin up to the opening. */
 async function createCharacter() {
   const offered = await page.evaluate(() => fetch('/api/creation').then((r) => r.json()));
+  // First a detour: the preview answers late, while the name is being typed. The field keeps its focus and
+  // its text; then Esc leads step by step back to the title screen.
   await page.click('#btn-new-game');
   await page.waitForFunction(atStep, 'race', { timeout: 10000 });
+  await pick('Human');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(atStep, 'class', { timeout: 5000 });
+  let answerPreview;
+  const previewHeld = new Promise((done) => (answerPreview = done));
+  await page.route('**/api/creation/preview**', async (route) => {
+    await previewHeld;
+    await route.continue();
+  });
+  await pick('Wizard');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(atStep, 'skills', { timeout: 5000 });
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(atStep, 'name', { timeout: 5000 });
+  await page.keyboard.type('Ab');
+  if ((await page.evaluate(() => window.__aiv.creation.preview)) !== null) errors.push('late-preview: the preview is in before the server answered');
+  answerPreview();
+  await page.waitForFunction(() => window.__aiv.creation.preview !== null && !document.getElementById('creation-preview').hidden, null, { timeout: 10000 });
+  await page.unroute('**/api/creation/preview**');
+  await page.keyboard.type('c');
+  const typed = await page.evaluate(() => ({ focused: document.activeElement?.id, field: document.getElementById('creation-name')?.value, name: window.__aiv.creation.choices.name }));
+  if (typed.focused !== 'creation-name' || typed.field !== 'Abc' || typed.name !== 'Abc') errors.push(`late-preview: after the preview arrived the name field is ${JSON.stringify(typed)}`);
+  for (const back of ['skills', 'class', 'race']) {
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(atStep, back, { timeout: 5000 });
+  }
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__aiv.screen === 'title' && window.__aiv.creation === null && !document.getElementById('title-screen').hidden && document.getElementById('creation-panel').hidden, null, { timeout: 5000 })
+    .catch(() => errors.push('create-race: Esc on the first step does not lead back to the title screen'));
+
+  await page.click('#btn-new-game');
+  await page.waitForFunction(atStep, 'race', { timeout: 10000 });
+  if ((await choicesNow()) !== JSON.stringify({ race: null, class_name: null, skills: [], name: '', weapon: null, armor: null, portrait: null })) errors.push('create-race: a new creation starts with choices');
   if (await page.isVisible('#title-screen')) errors.push('create-race: the title panel stays behind the creation panel');
   if ((await page.locator('#creation-steps .create-step').count()) !== 8) errors.push('create-race: the step row does not have eight steps');
 
@@ -786,7 +821,19 @@ async function saveSteps() {
   if ((await page.locator('#saves-slots .save-slot.empty button').count()) !== 0) errors.push('load-panel: an empty row has a button');
   if ((await page.locator(`${row} button[data-action="overwrite"]`).count()) !== 0) errors.push('load-panel: a row offers Overwrite');
   await shot('load-panel');
+  // The answer is held back: Esc and Close do not take the panel away while the load is on its way.
+  let answerLoad;
+  const loadHeld = new Promise((done) => (answerLoad = done));
+  await page.route('**/api/saves/*/load', async (route) => {
+    await loadHeld;
+    await route.continue();
+  });
   await page.click(`${row} button[data-action="load"]`);
+  await page.keyboard.press('Escape');
+  await page.click('#saves-close');
+  await page.waitForTimeout(200);
+  if (await page.evaluate(() => window.__aiv.saves === null || document.getElementById('saves-panel').hidden)) errors.push('load-panel: the panel can be closed while the load is on its way');
+  answerLoad();
   await page.waitForFunction((id) => window.__aiv.saves === null && window.__aiv.state?.area?.id === id && window.__aiv.screen === 'world' && !window.__aiv.loading && window.__aiv.player !== null && !window.__aiv.menuOpen, saved.area, { timeout: 60000 });
   const loaded = await page.evaluate(() => ({ character: window.__aiv.state.character, kept: sessionStorage.getItem('aiv.return') }));
   if (JSON.stringify(loaded.character) !== JSON.stringify(saved.character)) errors.push(`load-panel: the character is ${JSON.stringify(loaded.character)}, saved was ${JSON.stringify(saved.character)}`);

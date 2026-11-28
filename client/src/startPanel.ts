@@ -240,7 +240,10 @@ export function renderCreation(
     mark.dataset.step = name;
     return mark;
   }));
-  el('creation-body').replaceChildren(...stepBody(view, step, choices, preview));
+  // The name field is never rebuilt while its step is shown: an answer that arrives while the player types
+  // (the preview) must not take the field, its caret or its focus away.
+  const typing = step === 'name' && shownStep === 'name' && document.getElementById('creation-name') !== null;
+  if (!typing) el('creation-body').replaceChildren(...stepBody(view, step, choices, preview));
   const box = el('creation-preview');
   box.hidden = preview === null;
   box.replaceChildren(...(preview ? previewBox(choices, preview) : []));

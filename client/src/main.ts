@@ -1628,6 +1628,11 @@ function closeSaves(back = true): void {
   else showMenu(true);
 }
 
+/** Esc and Close: not while a save, a load or a delete is on its way, whose answer the panel has to show. */
+function dismissSaves(): void {
+  if (!slotsLocked) closeSaves();
+}
+
 /** A button of a slot: "Overwrite" and "Delete" ask first, "Save here" and "Load" act at once. */
 function slotPressed(action: SlotAction, id: string | null): void {
   if (!slots || slotsLocked || slots.confirm) return;
@@ -1647,7 +1652,13 @@ async function slotSend(action: SlotAction, id: string | null): Promise<void> {
   mine.confirm = null;
   drawSaves();
   const answer = await postSave(action === 'overwrite' ? 'save' : action, id);
-  if (slots !== mine) return;
+  if (slots !== mine) {
+    // The panel was taken away meanwhile (the world was left). What the server did still holds: after a
+    // load the session is the loaded game, so the client goes on with it.
+    if (answer.ok) saveCount = answer.saves.saves.length;
+    if (answer.ok && action === 'load' && answer.state) await resumeLoaded(answer.state, answer.message);
+    return;
+  }
   if (!answer.ok) {
     // The slots are everybody's: show them as they are now.
     const now = await fetchSaves();
@@ -1695,7 +1706,7 @@ bindSavesPanel({
     slots.confirm = null;
     drawSaves();
   },
-  close: () => closeSaves(),
+  close: dismissSaves,
 });
 
 /** A change in the settings panel: in use and in the browser's storage at once. */
@@ -1798,7 +1809,7 @@ window.addEventListener('keydown', (event) => {
   if (slots || settingsOpen) {
     // The save slots or the settings are open: Esc closes them; the arrow keys belong to the sliders.
     if (event.code === 'Escape' && !event.repeat) {
-      if (slots) closeSaves();
+      if (slots) dismissSaves();
       else closeSettings();
     }
     return;
