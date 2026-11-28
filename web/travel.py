@@ -1,6 +1,6 @@
 """Travel between locations, the journal and the ending as functions of a session.
 
-Shared by the classic routes and the JSON API. No `Request`, no saving. Progression is derived from
+Called by the JSON API. No `Request`, no saving. Progression is derived from
 `session.defeated_bosses` by engine/campaign.py.
 """
 
@@ -76,12 +76,12 @@ def travel_view(session: GameSession) -> dict:
     return {"current": current, "acts": acts}
 
 
-def travel(session: GameSession, location_name: str, in_3d: bool = False) -> str:
+def travel(session: GameSession, location_name: str) -> str:
     """Travel to a location of an unlocked act: "arrived", "ambush" or "defeat".
 
     The character arrives in the location's starting area and its contents are rolled. A pursuing
     boss may strike on the road: then the fight is pending with the character already at the
-    destination. `in_3d` says which interface the fight is played in.
+    destination.
     """
     act, location = check_destination(session, location_name)
 
@@ -92,12 +92,9 @@ def travel(session: GameSession, location_name: str, in_3d: bool = False) -> str
 
     ambush = campaign_rules.pending_ambush(get_bosses(), act, session.defeated_bosses)
     if ambush and session.character.current_hit_points > 0:
-        session.return_to_3d = in_3d
         # Fought on the road rather than at a boss's place
-        if not fight.begin_boss_battle(session, ambush, place="road" if in_3d else "monster"):
-            fight.end_battle(session, False)
-            return "defeat"
-        return "ambush"
+        phase = fight.opened(session, fight.begin_boss_battle(session, ambush, place="road"))
+        return "ambush" if phase == "fight" else "defeat"
     return "arrived"
 
 

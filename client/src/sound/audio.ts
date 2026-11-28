@@ -1,7 +1,7 @@
 // The sound itself: an AudioContext, one synthesizer per cue, the ambience beds and the two master gains.
 // Everything is made of oscillators and noise; there are no audio files. It decides nothing: it plays the
 // cue it is given (cues.ts says which and when) and the ambience it is given, at the gains it is given
-// (volume.ts). The twelve classic cues follow the recipes of SFX in web/static/js/main.js.
+// (volume.ts).
 
 import type { Ambience, AmbienceBed, SoundCue } from './cues';
 
@@ -81,7 +81,7 @@ export function createSoundEngine(): SoundEngine {
   };
 
   const SYNTHS: Record<SoundCue, () => void> = {
-    // The classic twelve.
+    // The twelve of menus and fights.
     hit: () => {
       noise(0.12, 600, 0.25);
       osc(120, 'sine', 0.1, 0.2);

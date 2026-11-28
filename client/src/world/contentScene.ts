@@ -14,7 +14,7 @@ import type { Figure } from './modelLoader';
 // where it stood, without glow, light or name. Elara stands in her stall whatever the area holds, with a
 // gold "!" above her while a quest waits to be turned in. Rebuilt whenever the contents change.
 
-const GOLD = '#daa520'; // the gold of the classic headings
+const GOLD = '#daa520'; // the gold of the headings
 const INK = '#e8dcc4';
 const FALLBACK = '#6a6672'; // a model that failed to load is a box of this colour, or of its tint
 const LABEL_WIDTH = 2; // m

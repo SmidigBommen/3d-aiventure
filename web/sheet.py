@@ -1,4 +1,4 @@
-"""The character sheet as functions of a session: shared by the classic routes and the JSON API."""
+"""The character sheet as functions of a session, called by the JSON API."""
 
 from character import WeaponSlot
 from engine.abilities import summarize_ability

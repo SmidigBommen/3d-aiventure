@@ -77,9 +77,6 @@ def _make_session_with_character():
     session.shop_inventory = [{"name": "Potion", "healing": 5, "price": 10, "quantity": 3}]
     session.haggled_items = {"0": 15}
 
-    # Set flash
-    session.set_flash("shop_message", "Hello!")
-
     return session
 
 
@@ -182,11 +179,14 @@ class TestSessionRoundtrip:
         assert len(restored.shop_inventory) == 1
         assert restored.haggled_items == {"0": 15}
 
-    def test_flash_messages_preserved(self):
+    def test_removed_keys_are_ignored_on_load(self):
+        """A session file from before the classic interface was removed still loads."""
         session = _make_session_with_character()
         d = session.to_dict()
-        restored = GameSession.from_dict(d)
-        assert restored.pop_flash("shop_message") == "Hello!"
+        d.update(return_to_3d=True, haggle_result={"roll": 12}, _flash={"shop_message": "Hello!"})
+        restored = GameSession.from_dict(json.loads(json.dumps(d)))
+        assert restored.character.gold == 42 and restored.haggled_items == {"0": 15}
+        assert not {"return_to_3d", "haggle_result", "_flash"} & set(restored.to_dict())
 
     def test_location_restored(self):
         session = _make_session_with_character()

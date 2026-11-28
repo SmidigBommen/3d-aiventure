@@ -3,8 +3,10 @@
 //   node execution/smoke.mjs --url URL --out DIR     against a server that is already running
 //   node execution/smoke.mjs --serve --out DIR       builds nothing, but starts its own server on a
 //                                                    free port with an empty data folder (run `pnpm build` first)
-// In both modes it makes its character in the creation panel of the 3D client (no classic creation route is
-// called), reads the opening, changes the settings and reloads, saves, loads and deletes a save from the menu
+// Everything happens in the 3D client and through /api: a request to a path of the server-rendered interface
+// that used to exist (/game, /battle, ...) is an error, except in the step classic-redirect, which checks that
+// such a path leads to /.
+// In both modes it makes its character in the creation panel of the 3D client, reads the opening, changes the settings and reloads, saves, loads and deletes a save from the menu
 // and quits to the title screen. With --url and ten saves on the server the save steps are skipped.
 // With --serve it also fights in the 3D world: a win, an ability and an item, a flight, a defeat with
 // Rise Again, and a reload in the middle of a fight; it plays events in the event panel (a success, a
@@ -25,7 +27,7 @@
 // a scene over its limit is an error). With --serve also: a monster that notices (feel-noticed), the cues of
 // every turn of a fight (sound-fight), a level-up (feel-levelup), the red edge at low hit points (feel-low-hp),
 // the coin of a purchase (sound-coin) and the frame time of a fight.
-// Loads the 3D client and the classic interface from a running server in headless Chromium,
+// Loads the 3D client from a running server in headless Chromium,
 // saves a screenshot of each step to DIR, and exits 1 on a page error, console error,
 // failed request, HTTP status >= 400, a 3D view that renders nothing, a model that did not load,
 // or a frame of more than 150,000 triangles.
@@ -40,7 +42,7 @@ import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCENES, readBaseline, referenceScene, verdict } from './frames.mjs';
+import { SCENES, journey, readBaseline, referenceScene, verdict, walkToArea } from './frames.mjs';
 // The pure modules of the client say which cues a turn has; the page is compared with them.
 import { resultSounds, turnSounds } from '../client/src/sound/cues.ts';
 import { buildTimeline } from '../client/src/battle/timeline.ts';
@@ -99,15 +101,20 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
 const errors = [];
+// The paths of the server-rendered interface that was removed. Nothing asks for one, except the step that
+// checks where they lead (`redirectStep`).
+const RETIRED = /^\/(classic|character|game|battle|shop|inventory|saves)([/?#].*)?$/;
+let redirectStep = false;
+// What one step lets through of what it causes on purpose (server-silent: its aborted request).
+let letThrough = () => false;
 /** Reports what goes wrong on a page. A line for which `tolerate` answers true is let through. */
 function watch(p, tolerate = () => false) {
-  const report = (line) => tolerate(line) || errors.push(line);
+  const report = (line) => tolerate(line) || letThrough(line) || errors.push(line);
   p.on('pageerror', (e) => report(`page error: ${e}`));
   p.on('console', (m) => m.type() === 'error' && report(`console: ${m.text()} (${m.location().url})`));
   p.on('response', (r) => r.status() >= 400 && report(`${r.status()} ${r.url()}`));
   p.on('requestfailed', (r) => report(`request failed: ${r.url()}`));
-  // The character is made in the 3D client: nothing here goes to a classic creation route.
-  p.on('request', (r) => new URL(r.url()).pathname.startsWith('/character') && report(`a request to ${r.url()}`));
+  p.on('request', (r) => !redirectStep && RETIRED.test(new URL(r.url()).pathname) && errors.push(`a request to ${r.url()}`));
 }
 let page = await context.newPage();
 watch(page);
@@ -164,16 +171,6 @@ async function worldShot(name, missing = []) {
   if (!(seen.triangles > 0 && seen.triangles <= MAX_TRIANGLES)) errors.push(`${name}: ${seen.triangles} triangles in the frame, the limit is ${MAX_TRIANGLES}`);
 }
 
-/** A form POST from the page, so it carries the page's session cookie. Repeated fields are allowed. */
-async function post(path, fields) {
-  const result = await page.evaluate(async ([p, f]) => {
-    const r = await fetch(p, { method: 'POST', body: new URLSearchParams(f) });
-    await r.text(); // read to the end, or the next navigation aborts the request
-    return { ok: r.ok, status: r.status };
-  }, [path, fields]);
-  if (!result.ok) throw new Error(`POST ${path} answered ${result.status}`);
-}
-
 /** Opens / and waits for the title panel to offer Continue. */
 async function openTitle() {
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
@@ -193,9 +190,9 @@ async function enterWorld() {
   return { area, location };
 }
 
-/** Travels through the classic route, then enters the world there, in the location's starting area. */
+/** Travels with POST /api/travel, then enters the world there, in the location's starting area. */
 async function travelAndEnter(locationName, name) {
-  await post('/game/travel', [['location_name', locationName]]);
+  await journey(page, locationName);
   await openTitle();
   const { location } = await enterWorld();
   if (location.name !== locationName) errors.push(`travelled to ${locationName} but the world shows ${location.name}`);
@@ -204,31 +201,7 @@ async function travelAndEnter(locationName, name) {
 
 /** Walks to an area of the current location with POST /api/move, along the connections, then enters the world there. */
 async function moveAndEnter(areaId) {
-  const now = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
-  const areas = campaign.acts.flatMap((act) => act.locations).find((loc) => loc.name === now.location.name).areas;
-  const from = new Map([[now.area.id, null]]);
-  const queue = [now.area.id];
-  while (queue.length && !from.has(areaId)) {
-    const at = queue.shift();
-    for (const next of areas.find((a) => a.id === at).connections) {
-      if (from.has(next)) continue;
-      from.set(next, at);
-      queue.push(next);
-    }
-  }
-  const steps = [];
-  for (let at = areaId; from.get(at) != null; at = from.get(at)) steps.unshift(at);
-  for (const step of steps) {
-    const status = await page.evaluate(
-      async (id) => {
-        const r = await fetch('/api/move', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ area_id: id }) });
-        await r.text(); // read to the end, or the next navigation aborts the request
-        return r.status;
-      },
-      step,
-    );
-    if (status !== 200) throw new Error(`POST /api/move to ${step} answered ${status}`);
-  }
+  await walkToArea(page, areaId);
   await openTitle();
   const { area } = await enterWorld();
   if (area.id !== areaId) errors.push(`moved to ${areaId} but the world shows ${area.id}`);
@@ -811,7 +784,7 @@ const settingsNow = () => page.evaluate(() => JSON.stringify(window.__aiv.settin
 /** The settings panel: a change is in use at once and still there after a reload. Ends walking, with the defaults back. */
 async function settingsSteps() {
   await openMenu();
-  if (await page.locator('#menu-saves').count()) errors.push('settings: the menu still links to the classic saves page');
+  if (await page.locator('#menu-saves').count()) errors.push('settings: the menu has an entry for a saves page');
   await page.click('#menu-settings');
   await page.waitForFunction(() => window.__aiv.settingsOpen && !document.getElementById('settings-panel').hidden && document.getElementById('menu').hidden, null, { timeout: 5000 });
   if ((await settingsNow()) !== JSON.stringify({ sensitivity: 1, invertY: false, fov: 70 })) errors.push(`settings: they start as ${await settingsNow()}`);
@@ -1012,38 +985,51 @@ async function quitToTitle() {
 }
 
 /**
- * With --serve: the title screen while something is pending that the client cannot open here (an event the
- * data no longer has). New game and Load game work there as on the plain title screen. Ends on the plain one.
+ * The server does not answer: the title screen says so and offers Try again, which asks as a page load does.
+ * Begins and ends on the title screen with Continue.
  */
-async function pendingTitle() {
-  const made = await postJson('/api/saves', {});
+async function serverSilent() {
+  // The aborted request and what the browser logs about it are this step's own.
+  letThrough = (line) => line.includes('/api/state');
+  await page.route('**/api/state', (route) => route.abort());
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
+  await page.waitForSelector('#btn-retry', { state: 'visible', timeout: 30000 });
+  const silent = await page.evaluate(() => ({
+    message: document.getElementById('title-message').hidden ? null : document.getElementById('title-message').textContent,
+    retry: [document.getElementById('btn-retry').tagName, document.getElementById('btn-retry').textContent],
+    others: ['btn-new-game', 'btn-continue', 'btn-load-game'].filter((id) => !document.getElementById(id).hidden),
+    screen: window.__aiv.screen, state: window.__aiv.state,
+  }));
+  if (silent.message !== 'The server did not answer.' || silent.retry.join() !== 'BUTTON,Try again' || silent.others.length || silent.screen !== 'title' || silent.state !== null) {
+    errors.push(`server-silent: ${JSON.stringify(silent)}`);
+  }
+  await shot('server-silent');
+  await page.unroute('**/api/state');
+  await page.click('#btn-retry');
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 }).catch(() => errors.push('server-silent: Try again does not bring the title screen with its buttons'));
+  if ((await page.isVisible('#btn-retry')) || (await page.isVisible('#title-message')) || !(await page.isVisible('#btn-new-game'))) errors.push('server-silent: after Try again the title screen is not the plain one');
+  letThrough = () => false;
+}
+
+/**
+ * With --serve: a session whose pending event the data no longer has. Nothing is pending for the client:
+ * Continue is offered and leads into the world. Ends on the title screen.
+ */
+async function staleEvent() {
   editSession((session) => {
     session.pending_event = 'smoke-no-such-event';
   });
   await page.reload({ waitUntil: 'load', timeout: 30000 });
-  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'pending', null, { timeout: 30000 });
-  for (const id of ['#btn-new-game', '#btn-load-game', '#pending-link']) if (!(await page.isVisible(id))) errors.push(`title-pending: ${id} is not offered`);
-  if (await page.isVisible('#btn-continue')) errors.push('title-pending: Continue is offered with something pending');
-  await shot('title-pending');
-
-  await page.click('#btn-load-game');
-  await page.waitForFunction(() => window.__aiv.saves?.mode === 'load' && !document.getElementById('saves-panel').hidden, null, { timeout: 10000 })
-    .catch(() => errors.push('title-pending: Load game does not open the save slots'));
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(() => window.__aiv.saves === null && !document.getElementById('title-screen').hidden, null, { timeout: 5000 })
-    .catch(() => errors.push('title-pending: Esc does not lead back from the save slots to the title screen'));
-
-  await page.click('#btn-new-game');
-  await page.waitForFunction(atStep, 'race', { timeout: 10000 }).catch(() => errors.push('title-pending: New game does not open creation'));
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(() => window.__aiv.screen === 'pending' && window.__aiv.creation === null && !document.getElementById('title-screen').hidden, null, { timeout: 5000 })
-    .catch(() => errors.push('title-pending: Esc does not lead back from creation to the title screen'));
-  if (!(await page.isVisible('#pending-link'))) errors.push('title-pending: the pending link is gone after creation was left');
-
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'title' && window.__aiv.state !== null, null, { timeout: 30000 });
+  if (!(await page.isVisible('#btn-continue'))) errors.push('stale-event: Continue is not offered');
+  const waiting = await page.evaluate(() => window.__aiv.state.pending);
+  if (waiting !== null) errors.push(`stale-event: the state says pending ${JSON.stringify(waiting)}`);
+  await shot('stale-event');
+  await page.click('#btn-continue');
+  await page.waitForFunction(inWorld, null, { timeout: 60000 }).catch(() => errors.push('stale-event: Continue does not lead into the world'));
   editSession((session) => {
     session.pending_event = null;
   });
-  await postJson(`/api/saves/${made.body.save_id}/delete`, {});
   await page.reload({ waitUntil: 'load', timeout: 30000 });
   await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'title', null, { timeout: 30000 });
   await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
@@ -1068,10 +1054,18 @@ try {
   if (serve && (await page.isVisible('#btn-load-game'))) errors.push('Load game is offered without a save');
   if (variety < 0.05) errors.push(`the 3D view is blank: only ${(variety * 100).toFixed(1)}% of sampled pixels differ from the background`);
 
-  // 2. The classic interface still answers.
-  await page.goto(`${url}/classic`, { waitUntil: 'load', timeout: 30000 });
-  await page.waitForSelector('.home-hero', { timeout: 10000 });
-  await shot('classic-home');
+  // 2. A path of the server-rendered interface that was removed answers 303 and leads to the title screen.
+  redirectStep = true;
+  for (const path of ['/game', '/classic', '/battle/victory']) {
+    const landed = await page.goto(`${url}${path}`, { waitUntil: 'load', timeout: 30000 });
+    const first = await landed.request().redirectedFrom()?.response();
+    if (first?.status() !== 303 || first.headers().location !== '/') errors.push(`classic-redirect: ${path} was first answered ${first?.status()} to ${first?.headers().location}`);
+    if (new URL(page.url()).pathname !== '/' || new URL(page.url()).search !== '') errors.push(`classic-redirect: ${path} ends on ${page.url()}`);
+    await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.screen === 'title', null, { timeout: 30000 });
+    await page.waitForSelector('#btn-new-game', { state: 'visible', timeout: 10000 }).catch(() => errors.push(`classic-redirect: ${path} does not end on the title screen`));
+  }
+  redirectStep = false;
+  await shot('classic-redirect');
 
   // 3. A character, made in the creation panel with clicks and typed keys, then the opening.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
@@ -1134,7 +1128,9 @@ try {
   await settingsSteps();
   await saveSteps();
   await quitToTitle();
-  if (serve) await pendingTitle();
+  await serverSilent();
+  if (serve) await staleEvent();
+  else console.log('skipped without --serve (the session cannot be edited): stale-event');
 
   // 5. Into the world again with Continue.
   const start = await enterWorld();
@@ -1302,7 +1298,7 @@ try {
   }
 
   // Back to the town square for the walk through its gate.
-  await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+  await journey(page, 'Rivermeet Town');
   await openTitle();
   await enterWorld();
 
@@ -1354,14 +1350,12 @@ try {
   if (!(await page.evaluate(() => window.__aiv.menuOpen))) errors.push('the menu is visible but __aiv.menuOpen is false');
   await shot('menu');
 
-  // 8. From the menu to the classic location page, which is in the area just walked to.
-  await Promise.all([page.waitForURL(/\/game\/?$/, { timeout: 30000 }), page.click('#menu-location')]);
-  await page.waitForSelector('.nav-3d', { timeout: 10000 });
-  if (!(await page.content()).includes(served.area.name)) errors.push(`the classic location page does not name ${served.area.name}`);
-  await shot('classic-location');
+  // 8. The menu leads to no other page: every entry of it is a button.
+  const links = await page.evaluate(() => [...document.querySelectorAll('#menu a')].map((a) => a.getAttribute('href')));
+  if (links.length) errors.push(`the menu has links: ${links.join(', ')}`);
 
-  // 9. And back through the link in the classic navigation.
-  await Promise.all([page.waitForURL((u) => u.pathname === '/', { timeout: 30000 }), page.click('.nav-3d')]);
+  // 9. A reload leads to the title screen, which offers the way back in.
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
   await page.waitForFunction(() => window.__aiv && window.__aiv.ready, null, { timeout: 30000 });
   await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
   await shot('title-return');
@@ -1400,7 +1394,7 @@ try {
   // 12. The Whispering Woods. With --serve a goblin is planted at the entrance before the world is entered.
   const GOBLIN = { id: 'smoke-goblin', race: 'Goblin', class_name: 'Rogue', level: 1, name: 'Grak', weapon: 'Club' };
   const ORC = { id: 'smoke-orc', race: 'Orc', class_name: 'Fighter', level: 4, name: 'Thurg', weapon: 'Greatclub' };
-  await post('/game/travel', [['location_name', 'Whispering Woods']]);
+  await journey(page, 'Whispering Woods');
   if (serve) plant(GOBLIN, null);
   await openTitle();
   const woods = await enterWorld();
@@ -1409,7 +1403,7 @@ try {
 
   // 13. What an area holds: a monster, an event object and the search spot, met and come back from.
   const encounters = ['content-monster', 'feel-noticed', 'prompt-monster', 'battle-start', 'battle-turn', 'sound-fight', 'battle-victory', 'battle-after', 'content-monster-gone',
-    'battle-ability', 'battle-item', 'feel-levelup', 'battle-flee', 'feel-low-hp', 'battle-defeat', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'event-panel', 'event-reload',
+    'battle-ability', 'battle-item', 'feel-levelup', 'battle-flee', 'feel-low-hp', 'battle-defeat', 'defeat-start-over', 'battle-revived', 'battle-reload', 'content-event', 'prompt-event', 'event-panel', 'event-reload',
     'event-success', 'event-spent', 'event-failure', 'event-fight-result', 'event-fight', 'content-event-gone', 'prompt-search', 'after-search'];
   if (serve) {
     await slotShot('monster', 'content-monster');
@@ -1589,6 +1583,33 @@ try {
     const lost = await page.textContent('#battle-result');
     if (!lost.includes('You have been slain by Grak') || !lost.includes('Rise Again')) errors.push(`battle-defeat: the result panel says "${lost}"`);
     await shot('battle-defeat');
+
+    // 13g·. Start Over is a button: it opens character creation over the title scene and posts nothing. Esc
+    // leads to the title screen, and Continue there to the defeat again.
+    {
+      if (await page.locator('#battle-restart').evaluate((b) => b.tagName !== 'BUTTON' || b.hasAttribute('href') || b.textContent !== 'Start Over')) errors.push('defeat-start-over: #battle-restart is not a button that says Start Over');
+      const sent = [];
+      const count = (request) => request.method() !== 'GET' && sent.push(`${request.method()} ${request.url()}`);
+      page.on('request', count);
+      await page.click('#battle-restart');
+      await page.waitForFunction(atStep, 'race', { timeout: 10000 }).catch(() => errors.push('defeat-start-over: Start Over does not open creation at the race step'));
+      const over = await page.evaluate(() => ({
+        screen: window.__aiv.screen, battle: window.__aiv.battle, hud: !document.getElementById('hud').hidden,
+        fight: !document.getElementById('battle-panel').hidden, edge: window.__aiv.vignette,
+      }));
+      if (over.screen !== 'creation' || over.battle !== null || over.hud || over.fight || over.edge !== 0) errors.push(`defeat-start-over: ${JSON.stringify(over)}`);
+      await shot('defeat-start-over');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => window.__aiv.screen === 'title' && window.__aiv.creation === null && !document.getElementById('title-screen').hidden, null, { timeout: 5000 })
+        .catch(() => errors.push('defeat-start-over: Esc does not lead from the first step to the title screen'));
+      if (!(await page.isVisible('#btn-continue'))) errors.push('defeat-start-over: the title screen does not offer Continue');
+      page.off('request', count);
+      if (sent.length) errors.push(`defeat-start-over: Start Over sent ${sent.join(', ')}`);
+      await page.click('#btn-continue');
+      await page.waitForFunction(() => window.__aiv.screen === 'battle' && window.__aiv.battle?.result === 'defeat' && !document.getElementById('battle-result').hidden && !window.__aiv.loading, null, { timeout: 60000 })
+        .catch(() => errors.push('defeat-start-over: Continue does not lead back to the defeat'));
+      await page.waitForSelector('#battle-revive', { state: 'visible', timeout: 10000 });
+    }
     await page.click('#battle-revive');
     await page.waitForFunction(inWorld, null, { timeout: 60000 });
     const risen = await page.evaluate(() => ({ area: window.__aiv.state.area.id, character: window.__aiv.state.character, battle: window.__aiv.battle }));
@@ -1737,7 +1758,7 @@ try {
 
   // 13n. A discovery is the landmark of its area: the bridge of Rivermeet glows, and E at it opens the panel.
   if (serve) {
-    await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+    await journey(page, 'Rivermeet Town');
     await moveAndEnter('bridge');
     plant(null, { id: 'bridge_runes' });
     await openTitle();
@@ -1763,7 +1784,7 @@ try {
     if (kept.spent?.id !== 'bridge_runes' || kept.spent.landmark !== true || kept.kind === 'event') errors.push(`discovery-spent: ${JSON.stringify(kept)}`);
     await stillHome('discovery');
     await worldShot('discovery-spent');
-    await post('/game/travel', [['location_name', 'Whispering Woods']]);
+    await journey(page, 'Whispering Woods');
   } else {
     console.log('skipped without --serve (nothing can be planted): discovery, discovery-panel, discovery-spent');
   }
@@ -1877,8 +1898,13 @@ try {
     await page.keyboard.press('Enter');
     await backToWalking(facing, 'boss-defeat-scene');
     if (await page.evaluate(() => window.__aiv.contents?.boss !== null)) errors.push('boss-defeat-scene: the boss still stands in the grove');
+    // The journal of the server has the first boss of Act 1 as fallen.
+    const told = await page.evaluate(() => fetch('/api/journal').then((r) => r.json()));
+    const fallen = told.journal.acts[0].bosses.find((boss) => boss.name === guardianData.name);
+    if (fallen?.defeated !== true) errors.push(`act1-boss-defeated: the journal says ${JSON.stringify(told.journal.acts[0].bosses)}`);
+    await worldShot('act1-boss-defeated');
   } else {
-    console.log('skipped without --serve (the fight cannot be fixed): boss-intro, boss-fight, boss-enraged, boss-defeat-scene');
+    console.log('skipped without --serve (the fight cannot be fixed): boss-intro, boss-fight, boss-enraged, boss-defeat-scene, act1-boss-defeated');
   }
 
   // 14·. Frame time of the reference scenes (execution/frames.mjs measures; the baseline is in
@@ -1929,7 +1955,7 @@ try {
 
   // 16b. Inventory, character sheet and rest, in the tavern of Rivermeet. With --serve the character is
   // wounded, level 4 with its points unspent, and carries a second weapon and an armour it may use.
-  await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+  await journey(page, 'Rivermeet Town');
   await moveAndEnter('tavern');
   if (serve) {
     editSession((session) => {
@@ -2430,7 +2456,7 @@ try {
 
   // 17. A model that does not load: a fresh page in the town square, with the request for the well refused.
   // That one failed request and its console message are let through; a box stands in for the well.
-  await post('/game/travel', [['location_name', 'Rivermeet Town']]);
+  await journey(page, 'Rivermeet Town');
   await page.close();
   page = await context.newPage();
   const let_through = [];

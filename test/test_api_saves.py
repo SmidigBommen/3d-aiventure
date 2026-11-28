@@ -1,4 +1,4 @@
-"""The save slots of the 3D client: /api/saves. The files are the ones the classic /saves page uses."""
+"""The save slots of the 3D client: /api/saves."""
 
 import json
 import random
@@ -147,9 +147,9 @@ def test_round_trip_of_varied_sessions(folders, monkeypatch):
         loaded = json.loads(current.read_text())
         a, b = norm(loaded), norm(saved)
         for key in a:
-            if key not in ("session_id", "_flash", "battle_rewards"):
+            if key not in ("session_id", "battle_rewards"):
                 assert a[key] == b[key], (number, key)
-        assert loaded["_flash"] == {} and loaded["battle_rewards"] is None
+        assert "_flash" not in loaded and loaded["battle_rewards"] is None
         assert loaded["session_id"] != saved["session_id"]
         assert answer.json()["state"] == state == client.get("/api/state").json()
         if fighting:
@@ -217,29 +217,44 @@ def test_slots(folders):
     assert snapshot(saves) == kept and snapshot(sessions) == raw
 
 
-def test_saves_cross_the_interfaces(folders):
+def test_saves_cross_the_clients_and_the_save_manager(folders):
     sessions, saves = folders
     client, path = new_client(sessions)
     edit(path, lambda d: d["character"].update(gold=31))
     save_id = client.post("/api/saves").json()["save_id"]
     other = TestClient(app)
-    assert other.post(f"/saves/load/{save_id}", follow_redirects=False).status_code == 303
+    assert other.post(f"/api/saves/{save_id}/load").status_code == 200
     assert other.get("/api/state").json()["character"]["gold"] == 31
 
+    # A save written by the shared function is one of the slots and loads through the API.
     edit(path, lambda d: d["character"].update(gold=47))
-    assert client.post("/saves/save", follow_redirects=False).status_code == 303
+    made = save_manager.create_save(GameSession.from_dict(json.loads(path.read_text())))
     newest = client.get("/api/saves").json()["saves"]
-    classic_id = next(s["id"] for s in newest if s["id"] != save_id)
+    assert sorted(s["id"] for s in newest) == sorted([save_id, made["save_id"]])
     third = TestClient(app)
-    assert third.post(f"/api/saves/{classic_id}/load").json()["state"]["character"]["gold"] == 47
-    assert client.get("/saves").status_code == 200
+    assert third.post(f"/api/saves/{made['save_id']}/load").json()["state"]["character"]["gold"] == 47
+
+    # A save from before the classic interface was removed still loads; its keys are not carried on.
+    def old(d):
+        d["session_data"].update(return_to_3d=True, haggle_result={"roll": 12}, _flash={"shop_message": "Hello!"})
+        d["session_data"]["character"]["gold"] = 53
+    edit(saves / f"{save_id}.json", old)
+    before = set(sessions.glob("*.json"))
+    fourth = TestClient(app)
+    assert fourth.post(f"/api/saves/{save_id}/load").json()["state"]["character"]["gold"] == 53
+    (current,) = set(sessions.glob("*.json")) - before
+    assert not {"return_to_3d", "haggle_result", "_flash"} & set(json.loads(current.read_text()))
 
 
-def test_the_classic_page_still_refuses_a_save_in_a_fight(folders, monkeypatch):
+def test_a_save_in_a_fight_is_taken_and_resumes_the_fight(folders, monkeypatch):
     sessions, saves = folders
     client, path = new_client(sessions)
     start_fight(client, path, monkeypatch)
-    client.post("/saves/save")
+    battle = client.get("/api/battle").json()
     assert not snapshot(saves)
-    assert client.post("/api/saves").status_code == 200
+    answer = client.post("/api/saves")
+    assert answer.status_code == 200
     assert len(snapshot(saves)) == 1
+    other = TestClient(app)
+    assert other.post(f"/api/saves/{answer.json()['save_id']}/load").json()["state"]["pending"] == {"kind": "battle"}
+    assert other.get("/api/battle").json() == battle

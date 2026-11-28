@@ -1,4 +1,4 @@
-"""Where the player stands and where they can walk: logic shared by the classic routes and the JSON API.
+"""Where the player stands and where they can walk, as functions of a session. The JSON API calls them.
 
 None of this is a game rule; it reads the campaign data and the session.
 """
@@ -9,6 +9,9 @@ import uuid
 from engine import campaign as campaign_rules
 from engine.events import eligible_events, pick_event
 from web.game_session import GameSession, get_bosses, get_event_objects, get_events
+
+# Chance that a roll without a monster turns up an event
+EVENT_CHANCE = 0.65
 
 DEFAULT_LOCKED_TEXT = "The way is barred. Something else must fall first."
 
@@ -52,13 +55,17 @@ def starting_area(location):
 
 
 def pending(session: GameSession):
-    """What the player has to deal with before they can walk on: {"kind", "url"} or None."""
+    """What the player has to deal with before they can walk on: {"kind"} or None.
+
+    A pending event id that names no event (the data changed under an old session) is nothing to
+    deal with.
+    """
     if session.battle.is_active:
-        return {"kind": "battle", "url": "/battle"}
+        return {"kind": "battle"}
     if session.character and session.character.current_hit_points <= 0:
-        return {"kind": "defeat", "url": "/battle/defeat"}
-    if session.pending_event or session.event_result:
-        return {"kind": "event", "url": "/game/event"}
+        return {"kind": "defeat"}
+    if session.event_result or session.pending_event in get_events():
+        return {"kind": "event"}
     return None
 
 
@@ -98,12 +105,11 @@ def encounter_chance(area) -> float:
 def roll_explore(session: GameSession) -> dict:
     """The roll for what the current area holds: a monster, an event or nothing.
 
-    The one place this roll exists; classic Explore, entering an area and searching all use it.
+    The one place this roll exists; entering an area, travelling and searching all use it.
     Changes nothing in the session. Returns {"monster": None | {...}, "event": None | id}.
     """
-    # Imported here: both modules import this one. EVENT_CHANCE is read at every roll.
-    from web.routes import game as game_routes
-    from web.routes.battle import pick_monster
+    # Imported here: web.fight imports this module.
+    from web.fight import pick_monster
 
     area = session.current_area
     location = session.current_location
@@ -111,7 +117,7 @@ def roll_explore(session: GameSession) -> dict:
         return {"monster": pick_monster(area, location), "event": None}
 
     # No fight: maybe something more interesting than nothing
-    if random.random() < game_routes.EVENT_CHANCE:
+    if random.random() < EVENT_CHANCE:
         event_id = pick_event(get_events(), location.get("type") if location else None,
                               area.get("special"), session.completed_events)
         if event_id:

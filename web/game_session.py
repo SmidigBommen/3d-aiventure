@@ -118,29 +118,6 @@ def get_monster_taunts() -> dict:
     return _taunts_cache
 
 
-_portraits_cache = None
-
-
-def get_monster_portraits() -> dict:
-    """Get monster portrait mappings."""
-    global _portraits_cache
-    if _portraits_cache is None:
-        _portraits_cache = load_json("monster_portraits.json")
-    return _portraits_cache
-
-
-_battle_sprites_cache = None
-
-
-def get_battle_sprites() -> dict:
-    """Sprite sheets for the battle stage ({sheet, scale}): players by portrait, monsters by race,
-    bosses by boss id, plus backdrops."""
-    global _battle_sprites_cache
-    if _battle_sprites_cache is None:
-        _battle_sprites_cache = load_json("battle_sprites.json")
-    return _battle_sprites_cache
-
-
 _shopkeeper_cache = None
 
 
@@ -361,7 +338,6 @@ class GameSession:
         # Shop state (previously in request.session)
         self.shop_inventory = None    # None = needs initialization
         self.haggled_items = {}
-        self.haggle_result = None
         # Battle reward display (previously in request.session)
         self.battle_rewards = None
         # Campaign progression — acts/shards are derived from this (see engine/campaign.py)
@@ -373,19 +349,8 @@ class GameSession:
         self.events_resolved = 0      # lifetime counter for the journal
         # What waits in the area the character stands in (web/world.py): one monster or one event, not yet met
         self.area_contents = None     # {"location", "area_id", "seq", "monster", "event"}
-        self.return_to_3d = False     # the last encounter was started from the 3D world
         self.engaged_monster = None   # contents dict of the monster being fought when it was met in the 3D world
         self.battle_place = "monster"  # where in the area the monster of the fight stands (BATTLE_PLACES)
-        # Flash messages (one-time display, cleared after read)
-        self._flash = {}
-
-    def set_flash(self, key: str, value):
-        """Set a flash message (displayed once, then cleared)."""
-        self._flash[key] = value
-
-    def pop_flash(self, key: str, default=None):
-        """Pop a flash message (returns and removes it)."""
-        return self._flash.pop(key, default)
 
     def to_dict(self) -> dict:
         """Serialize session to dictionary for storage."""
@@ -425,7 +390,6 @@ class GameSession:
             "completed_quests": self.completed_quests,
             "shop_inventory": self.shop_inventory,
             "haggled_items": self.haggled_items,
-            "haggle_result": self.haggle_result,
             "battle_rewards": self.battle_rewards,
             "defeated_bosses": self.defeated_bosses,
             "pending_event": self.pending_event,
@@ -433,10 +397,8 @@ class GameSession:
             "completed_events": self.completed_events,
             "events_resolved": self.events_resolved,
             "area_contents": self.area_contents,
-            "return_to_3d": self.return_to_3d,
             "engaged_monster": self.engaged_monster,
             "battle_place": self.battle_place,
-            "_flash": self._flash,
         }
 
     def _get_weapon_name(self, c) -> Optional[str]:
@@ -558,7 +520,6 @@ class GameSession:
         session.completed_quests = data.get("completed_quests", [])
         session.shop_inventory = data.get("shop_inventory")
         session.haggled_items = data.get("haggled_items", {})
-        session.haggle_result = data.get("haggle_result")
         session.battle_rewards = data.get("battle_rewards")
         session.defeated_bosses = data.get("defeated_bosses", [])
         session.pending_event = data.get("pending_event")
@@ -566,11 +527,9 @@ class GameSession:
         session.completed_events = data.get("completed_events", [])
         session.events_resolved = data.get("events_resolved", 0)
         session.area_contents = data.get("area_contents")
-        session.return_to_3d = bool(data.get("return_to_3d", False))
         session.engaged_monster = data.get("engaged_monster")
         place = data.get("battle_place")
         session.battle_place = place if place in BATTLE_PLACES else "monster"
-        session._flash = data.get("_flash", {})
 
         # Restore location from campaign data
         campaign = get_campaign()

@@ -1,5 +1,5 @@
 """Elara's shop and the quests in the 3D world: /api/shop and the quests of the world state.
-Both interfaces must do the same thing to the same session."""
+A route must do to the session what the function of web/shop.py does with the same dice."""
 
 import copy
 import json
@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from dice import Dice
 import web.game_session as game_session
+from web import creation, fight, shop
 from web.app import app
 from web.game_session import GameSession
 
@@ -35,8 +36,8 @@ STATUS = {
     "already_haggled": 409, "no_such_quest": 404, "quest_slots_full": 409, "quest_taken": 409,
     "quest_not_ready": 409, "quest_not_active": 404,
 }
-CLASSIC = {"buy": "/shop/buy", "sell": "/shop/sell", "haggle": "/shop/haggle", "accept": "/shop/quest/accept",
-           "turn-in": "/shop/quest/turn-in", "abandon": "/shop/quest/abandon"}
+FUNCTIONS = {"buy": shop.buy, "sell": shop.sell, "haggle": shop.haggle, "accept": shop.accept_quest,
+             "turn-in": shop.turn_in_quest, "abandon": shop.abandon_quest}
 API = {"buy": "/api/shop/buy", "sell": "/api/shop/sell", "haggle": "/api/shop/haggle",
        "accept": "/api/shop/quest/accept", "turn-in": "/api/shop/quest/turn-in",
        "abandon": "/api/shop/quest/abandon"}
@@ -53,12 +54,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
     with TestClient(app) as c:
         c.sessions_dir = tmp_path
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Fighter"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
+        assert c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+            "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
             "skills": ["Athletics", "Perception"],
-        })
+        }).status_code == 200
         edit(c, lambda data: place(data, MARKET))
         yield c
 
@@ -103,10 +103,8 @@ def full_stock():
 
 
 def normal(text):
-    """The session without what only the classic page reads, and with the stock spelled out."""
+    """The session with the stock spelled out."""
     data = json.loads(text)
-    data.pop("_flash", None)
-    data.pop("haggle_result", None)
     if data.get("shop_inventory") is None:
         data["shop_inventory"] = full_stock()
     return data
@@ -223,6 +221,19 @@ def tracked(stored):
 # --- parity -------------------------------------------------------------------------------------------
 
 
+def by_function(text, action, fields, seed):
+    """What the function of web/shop.py does to a copy of the session with the same dice:
+    its outcome or its refusal, and the session after it."""
+    session = GameSession.from_dict(json.loads(text))
+    (value,) = fields.values()
+    random.seed(seed)
+    try:
+        done, rejection = FUNCTIONS[action](session, value), None
+    except fight.Rejected as rejected:
+        done, rejection = None, rejected
+    return done, rejection, json.dumps(session.to_dict())
+
+
 def test_parity_refusals_and_successes(client):
     refused, succeeded = set(), set()
     for seed in SEEDS:
@@ -233,54 +244,49 @@ def test_parity_refusals_and_successes(client):
         assert path.read_text() == s0
         for k, (action, fields) in enumerate(actions(len(start["character"]["inventory"]))):
             where = (seed, action, fields)
-            path.write_text(s0)
-            random.seed(k)
-            classic = client.post(CLASSIC[action], data=fields, follow_redirects=False)
-            assert classic.status_code == 303, where
-            a = path.read_text()
+            done, rejection, a = by_function(s0, action, fields, k)
             path.write_text(s0)
             random.seed(k)
             response = client.post(API[action], json=fields)
             b = path.read_text()
             assert normal(a) == normal(b), where
             body = response.json()
+            assert (response.status_code == 200) == (rejection is None), where
             assert (response.status_code == 200) == (normal(a) != normal(s0)), where
             if response.status_code == 200:
                 assert set(body) == {"shop", "state", "message", "haggle"}, where
                 stored = json.loads(b)
-                assert stored.get("_flash") == start.get("_flash"), where
-                assert stored.get("haggle_result") == start.get("haggle_result"), where
+                assert not {"_flash", "haggle_result"} & set(stored), where
                 check_view(body["shop"], stored)
                 assert body["state"]["quests"] == tracked(stored), where
                 assert body["state"]["character"]["gold"] == stored["character"]["gold"], where
-                flash = json.loads(a)["_flash"]
                 if action == "haggle":
-                    assert body["message"] is None, where
-                    assert body["haggle"] == json.loads(a)["haggle_result"], where
+                    assert body["message"] is None and done["message"] is None, where
+                    assert body["haggle"] == done["haggle"], where
                     check_dialog(body["shop"]["dialog"], "haggle_" + body["haggle"]["tier"])
-                    assert flash["shop_dialog_context"] == body["shop"]["dialog"]["context"], where
+                    assert done["context"] == body["shop"]["dialog"]["context"], where
                 else:
-                    assert body["haggle"] is None, where
-                    assert body["message"] == flash["shop_message"], where
+                    assert body["haggle"] is None and done["haggle"] is None, where
+                    assert body["message"] == done["message"], where
                     check_dialog(body["shop"]["dialog"], CONTEXT[action])
-                    assert flash["shop_dialog_context"] == CONTEXT[action], where
+                    assert done["context"] == CONTEXT[action], where
                 succeeded.add(action)
             else:
                 code = body["error"]
+                assert code == rejection.code, where
                 assert response.status_code == STATUS[code], where
-                assert b == s0, where
-                flash = json.loads(a)["_flash"]
-                assert body["message"] == flash["shop_error"], where
+                assert b == s0 == a, where
+                assert body["message"] == rejection.message, where
                 if code in ("already_haggled", "quest_slots_full"):
                     check_dialog(body["dialog"], {"already_haggled": "browse", "quest_slots_full": "quest_full"}[code])
-                    assert flash["shop_dialog_context"] == body["dialog"]["context"], where
+                    assert shop.REFUSAL_CONTEXT[code] == body["dialog"]["context"], where
                 else:
                     assert body.get("dialog") is None, where
-                    assert "shop_dialog_context" not in flash, where
+                    assert code not in shop.REFUSAL_CONTEXT, where
                 refused.add(code)
     if len(SEEDS) >= 100:
         assert refused == set(STATUS)
-        assert succeeded == set(CLASSIC)
+        assert succeeded == set(FUNCTIONS)
 
 
 # --- haggle -------------------------------------------------------------------------------------------
@@ -316,7 +322,7 @@ def test_haggle_tiers(client, monkeypatch, roll):
     assert (ware["haggled"], ware["discount"], ware["effective_price"]) == (True, discount, price)
     check_dialog(body["shop"]["dialog"], "haggle_" + tier)
     stored = read(client)
-    assert stored["haggle_result"] is None and not stored.get("_flash")
+    assert stored["haggled_items"] == {"1": discount} and "haggle_result" not in stored
 
     bought = client.post("/api/shop/buy", json={"item_index": 1}).json()
     assert bought["shop"]["gold"] == 500 - price
@@ -433,12 +439,12 @@ def test_buy_and_sell(client):
     assert (refused.status_code, refused.json()["error"]) == (409, "not_sellable")
     assert refused.json()["message"] == "Elara does not buy quest items."
     assert session_file(client).read_bytes() == before
-    client.post("/shop/sell", data={"item_index": 1}, follow_redirects=False)
-    after = session_file(client).read_text()
-    assert normal(after) == normal(before.decode())
-    assert json.loads(after)["_flash"]["shop_error"] == "Elara does not buy quest items."
+    copy_ = GameSession.from_dict(json.loads(before))
+    with pytest.raises(fight.Rejected) as rejection:
+        shop.sell(copy_, 1)
+    assert (rejection.value.code, rejection.value.message) == ("not_sellable", "Elara does not buy quest items.")
+    assert normal(json.dumps(copy_.to_dict())) == normal(before.decode())
 
-    session_file(client).write_bytes(before)
     sold = client.post("/api/shop/sell", json={"item_index": 2}).json()
     assert sold["message"] == "Sold Greater Healing Potion for 25 gold!"
     assert sold["shop"]["gold"] == 110
@@ -503,20 +509,21 @@ def test_quests(client):
     assert (unknown.status_code, unknown.json()["error"]) == (404, "no_such_quest")
 
 
-def test_turn_in_levels_up_as_classic(client):
+def test_turn_in_levels_up_as_the_function(client):
     def change(data):
         data["active_quests"] = {"shadow_knights": {"progress": 5, "status": "ready"}}
     s0 = edit(client, change)
-    random.seed(4)
-    client.post("/shop/quest/turn-in", data={"quest_id": "shadow_knights"}, follow_redirects=False)
-    a = session_file(client).read_text()
-    session_file(client).write_text(s0)
+    done, rejection, a = by_function(s0, "turn-in", {"quest_id": "shadow_knights"}, 4)
     random.seed(4)
     body = client.post("/api/shop/quest/turn-in", json={"quest_id": "shadow_knights"}).json()
     assert normal(a) == normal(session_file(client).read_text())
-    assert body["message"] == json.loads(a)["_flash"]["shop_message"]
+    assert rejection is None and body["message"] == done["message"]
     assert "Level up! You are now level" in body["message"]
     assert body["state"]["character"]["level"] > 1
+    after, before = read(client)["character"], json.loads(s0)["character"]
+    assert after["level"] == body["state"]["character"]["level"]
+    assert after["gold"] == before["gold"] + QUESTS["shadow_knights"]["rewards"]["gold"]
+    assert after["power_points"] == after["max_power_points"]
 
 
 @pytest.mark.parametrize("act", [1, 2, 3])
@@ -547,12 +554,11 @@ def kill_run(client, monkeypatch, quest_id, progress, seed):
     random.seed(seed)
     response = client.post("/api/battle/attack")
     b = json.loads(path.read_text())
-    path.write_text(start)
+    # The same blow through the function of web/fight.py, with the same dice
+    session = GameSession.from_dict(json.loads(start))
     random.seed(seed)
-    client.post("/battle/attack", follow_redirects=False)
-    a = json.loads(path.read_text())
-    a.pop("_flash", None)
-    b.pop("_flash", None)
+    assert fight.attack(session) == "victory"
+    a = json.loads(json.dumps(session.to_dict()))
     assert a == b
     return a, response.json()
 
@@ -588,12 +594,12 @@ def test_quest_progress_after_a_kill(client, monkeypatch, quest_id):
 def test_reading_writes_nothing(client):
     def change(data):
         data["shop_inventory"] = None
-        data["_flash"] = {"shop_message": "kept", "shop_dialog_context": "buy"}
-        data["haggle_result"] = {"roll": 3}
         data["character"]["gold"] = 6
     edit(client, change)
     data = read(client)
+    # Keys of a session file from before the classic interface was removed stay as they are, unread
     data["_flash"] = {"shop_message": "kept", "shop_dialog_context": "buy"}
+    data["haggle_result"] = {"roll": 3}
     session_file(client).write_text(json.dumps(data))
     before = session_file(client).read_bytes()
     body = client.get("/api/shop").json()
@@ -636,7 +642,7 @@ def test_refusals_in_order(client, fresh):
     # Pending comes before the shop and before the action's own refusal; a bad body before pending.
     for change in (lambda d: d["battle"].update(is_active=True),
                    lambda d: d["character"].update(current_hit_points=0),
-                   lambda d: d.update(pending_event="lost_traveler")):
+                   lambda d: d.update(pending_event="wounded_traveler")):
         for where in (MARKET, (1, "Rivermeet Town", "tavern")):
             data = json.loads(before)
             place(data, where)
@@ -647,6 +653,13 @@ def test_refusals_in_order(client, fresh):
                 assert refusal(client.post(API[action], json=fields)) == (409, "pending")
                 assert refusal(client.post(API[action], content=b"[]")) == (400, "bad_request")
             assert session_file(client).read_bytes() == kept
+
+    # A pending event id that names no event holds nothing up.
+    data = json.loads(before)
+    data.update(pending_event="lost_traveler")
+    session_file(client).write_text(json.dumps(data))
+    assert client.get("/api/state").json()["pending"] is None
+    assert client.post(API["accept"], json={"quest_id": "goblin_menace"}).status_code == 200
 
     data = json.loads(before)
     place(data, (1, "Rivermeet Town", "tavern"))
@@ -661,19 +674,6 @@ def test_refusals_in_order(client, fresh):
     assert session_file(client).read_bytes() == kept
 
 
-def test_classic_page_still_shows_the_shop(client):
-    edit(client, lambda data: data["character"].update(gold=100))
-    client.post("/shop/haggle", data={"item_index": 0}, follow_redirects=False)
-    assert read(client)["haggle_result"]["item_name"] == "Minor Healing Potion"
-    page = client.get("/shop/")
-    assert page.status_code == 200
-    assert "Minor Healing Potion" in page.text and "Elara" in page.text
-    assert read(client)["haggle_result"] is None
-    client.post("/shop/quest/accept", data={"quest_id": "goblin_menace"}, follow_redirects=False)
-    page = client.get("/shop/?tab=quests")
-    assert "Quest accepted: Goblin Menace" in page.text
-
-
 def test_names_other_code_imports():
-    from web.routes.shop import (  # noqa: F401
+    from web.shop import (  # noqa: F401
         calculate_sell_price, get_effective_price, get_shop_inventory, get_shopkeeper_dialog, restock_shop)

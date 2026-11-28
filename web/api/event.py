@@ -1,4 +1,4 @@
-"""JSON API of an exploration event in the 3D world. The logic is web/events.py, which the classic routes call too."""
+"""JSON API of an exploration event in the 3D world. The logic is web/events.py."""
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse

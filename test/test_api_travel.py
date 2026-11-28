@@ -1,11 +1,9 @@
 """Travel, the journal and the ending in the 3D world: /api/travel, /api/journal, /api/ending.
-Both interfaces must do the same thing to the same session."""
+A route must do to the session what the function of web/travel.py does with the same dice."""
 
-import html
 import itertools
 import json
 import random
-import re
 import sys
 from pathlib import Path
 
@@ -19,7 +17,9 @@ from fastapi.testclient import TestClient
 from dice import Dice
 from engine import campaign as rules
 import web.game_session as game_session
+from web import creation, fight, travel
 from web.app import app
+from web.game_session import GameSession
 
 CAMPAIGN = game_session.get_campaign()
 BOSSES = game_session.get_bosses()
@@ -97,12 +97,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
     with TestClient(app) as c:
         c.sessions_dir = tmp_path
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Fighter"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Longsword", "armor": "Chain Mail",
+        assert c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Fighter", "name": "Tester", "weapon": "Longsword",
+            "armor": "Chain Mail", "portrait": creation.PORTRAITS[0]["path"],
             "skills": ["Athletics", "Perception"],
-        })
+        }).status_code == 200
         yield c
 
 
@@ -130,17 +129,23 @@ def situation(client, location, defeated, area_id=None, hp=9999, **more):
     return session_file(client).read_bytes()
 
 
-def comparable(client):
-    data = read(client)
-    data.pop("return_to_3d", None)
-    data.pop("battle_place", None)
+def comparable(data):
+    """A session as stored, without the id a rolled monster is given."""
+    data = json.loads(json.dumps(data))
     if (data.get("area_contents") or {}).get("monster"):
         data["area_contents"]["monster"].pop("id", None)
     return data
 
 
-def text_of(page):
-    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", page)))
+def session_of(start):
+    return GameSession.from_dict(json.loads(start))
+
+
+def by_function(start, name):
+    """What travel.travel does to a copy of the session with the same dice: (outcome, session)."""
+    session = session_of(start)
+    random.seed(SEED)
+    return travel.travel(session, name), session
 
 
 def post_travel(client, name):
@@ -165,26 +170,34 @@ class TestTravelList:
                 assert answer.json()["state"] == client.get("/api/state").json()
                 assert session_file(client).read_bytes() == before
 
-    def test_the_classic_page_offers_the_same(self, client):
+    def test_the_function_offers_the_same(self, client):
         for defeated in PREFIXES:
+            unlocked = rules.highest_unlocked_act(CAMPAIGN, defeated)
             for _, here in LOCATIONS:
-                situation(client, here["name"], defeated)
+                start = situation(client, here["name"], defeated)
                 view = client.get("/api/travel").json()["travel"]
-                page = client.get("/game/travel").text
-                offered = [html.unescape(v) for v in re.findall(r'name="location_name" value="([^"]*)"', page)]
+                session = session_of(start)
+                assert view == travel.travel_view(session)
                 open_ones = [l for act in view["acts"] if not act["locked"] for l in act["locations"] if not l["current"]]
-                assert offered == [l["name"] for l in open_ones]
-                assert page.count("travel-act-locked") == sum(act["locked"] for act in view["acts"])
-                cards = page.split('class="loc-card"')[1:]
-                assert len(cards) == len(open_ones)
-                for card, loc in zip(cards, open_ones):
-                    assert ("Guardian defeated" in card) is loc["cleared"]
-                    assert (">Boss<" in card) is (loc["has_boss"] and not loc["cleared"])
-                    assert f"Recommended Level: {loc['level_range']}" in card
+                reachable = []
+                for _, loc in LOCATIONS:
+                    try:
+                        travel.check_destination(session, loc["name"])
+                    except fight.Rejected:
+                        continue
+                    reachable.append(loc["name"])
+                assert [l["name"] for l in open_ones] == [name for name in reachable if name != here["name"]]
+                assert sum(act["locked"] for act in view["acts"]) == len(CAMPAIGN["acts"]) - unlocked
+                assert session.to_dict() == session_of(start).to_dict()
+                for loc in open_ones:
+                    placed = [a["boss"] for _, l in LOCATIONS if l["name"] == loc["name"] for a in l["areas"] if a.get("boss")]
+                    assert loc["cleared"] is (bool(placed) and set(placed) <= set(defeated))
+                    assert not (loc["has_boss"] and loc["cleared"])
+                    assert loc["level_range"] == next(l["encounterLevel"] for _, l in LOCATIONS if l["name"] == loc["name"])
 
 
 class TestJourney:
-    def test_equals_classic_travel(self, client):
+    def test_equals_the_function(self, client):
         for defeated in PREFIXES:
             unlocked = rules.highest_unlocked_act(CAMPAIGN, defeated)
             for _, here in LOCATIONS:
@@ -192,18 +205,15 @@ class TestJourney:
                     if there["name"] == here["name"] or act["number"] > unlocked:
                         continue
                     start = situation(client, here["name"], defeated)
-                    random.seed(SEED)
-                    classic = client.post("/game/travel", data={"location_name": there["name"]}, follow_redirects=False)
-                    assert classic.status_code == 303
-                    classic_file = comparable(client)
+                    outcome, session = by_function(start, there["name"])
+                    assert outcome in ("arrived", "ambush", "defeat")
 
-                    session_file(client).write_bytes(start)
                     random.seed(SEED)
                     answer = post_travel(client, there["name"])
                     assert answer.status_code == 200, answer.text
                     body = answer.json()
-                    assert comparable(client) == classic_file
-                    assert (body["ambush"] is not None) is (classic.headers["location"] in ("/battle", "/battle/defeat"))
+                    assert comparable(read(client)) == comparable(session.to_dict())
+                    assert (body["ambush"] is not None) is (outcome != "arrived")
                     state = body["state"]
                     assert state["location"]["name"] == there["name"]
                     assert state["location"]["act"]["number"] == act["number"]
@@ -218,7 +228,7 @@ class TestJourney:
             "location": "Rivermeet Town", "area_id": "town_square", "seq": 6, "monster": None, "event": None, "spent": None})
         assert post_travel(client, "Whispering Woods").json()["state"]["contents"]["seq"] == 7
 
-    def test_a_locked_act_is_refused_in_both(self, client):
+    def test_a_locked_act_is_refused_by_the_route_and_the_function(self, client):
         for defeated in PREFIXES:
             unlocked = rules.highest_unlocked_act(CAMPAIGN, defeated)
             for act, there in LOCATIONS:
@@ -227,9 +237,11 @@ class TestJourney:
                 before = situation(client, "Rivermeet Town", defeated)
                 refused(post_travel(client, there["name"]), 409, "act_locked", reason(act["number"]))
                 assert session_file(client).read_bytes() == before
-                classic = client.post("/game/travel", data={"location_name": there["name"]}, follow_redirects=False)
-                assert (classic.status_code, classic.headers["location"]) == (303, "/game")
-                assert session_file(client).read_bytes() == before
+                session = session_of(before)
+                with pytest.raises(fight.Rejected) as rejection:
+                    travel.travel(session, there["name"])
+                assert (rejection.value.code, rejection.value.message) == ("act_locked", reason(act["number"]))
+                assert session.to_dict() == session_of(before).to_dict()
 
 
 class TestRefusals:
@@ -261,9 +273,9 @@ class TestRefusals:
 
         data = read(client)
         data["battle"]["is_active"] = True
-        fight = dict(battle=data["battle"])
+        fighting = dict(battle=data["battle"])
         event = next(iter(game_session.get_events()))
-        for kind, more in (("battle", fight), ("defeat", {"hp": 0}), ("event", {"pending_event": event})):
+        for kind, more in (("battle", fighting), ("defeat", {"hp": 0}), ("event", {"pending_event": event})):
             hp = more.pop("hp", 9999)
             before = situation(client, "Rivermeet Town", [], hp=hp, **more)
             if kind == "battle":
@@ -280,7 +292,7 @@ class TestRefusals:
 
 
 class TestAmbush:
-    def test_fires_exactly_when_classic_fires(self, client):
+    def test_fires_exactly_when_the_function_fires(self, client):
         act1 = ["Shard Guardian", "Corrupted Captain"]
         vex = BOSSES["Lady Vex"]
         seen = set()
@@ -297,18 +309,14 @@ class TestAmbush:
                                 continue
                             seen.add(key)
                             start = situation(client, here, defeated)
-                            random.seed(SEED)
-                            classic = client.post("/game/travel", data={"location_name": there["name"]}, follow_redirects=False)
-                            classic_data = read(client)
-                            classic_file = comparable(client)
-                            classic_fired = (classic.headers["location"] in ("/battle", "/battle/defeat")
-                                             and classic_data["battle"]["monster"]["boss_id"] == "Lady Vex")
-                            session_file(client).write_bytes(start)
+                            outcome, session = by_function(start, there["name"])
+                            function_fired = (outcome in ("ambush", "defeat")
+                                              and session.battle.monster.boss_id == "Lady Vex")
                             random.seed(SEED)
                             body = post_travel(client, there["name"]).json()
                             wanted = act["number"] == 2 and count >= 2 and not with_vex
-                            assert (body["ambush"] is not None) is wanted is classic_fired, key
-                            assert comparable(client) == classic_file
+                            assert (body["ambush"] is not None) is wanted is function_fired, key
+                            assert comparable(read(client)) == comparable(session.to_dict())
                             if not wanted:
                                 assert body["battle"] is None and body["ambush"] is None
                                 continue
@@ -319,9 +327,10 @@ class TestAmbush:
                             assert body["battle"]["monster"]["place"] == "road"
                             assert body["state"]["pending"]["kind"] == "battle"
                             assert body["state"]["location"]["name"] == there["name"]
-                            assert read(client)["return_to_3d"] is True
-                            # Classic: fought on the classic pages, on the monster's place.
-                            assert classic_data["return_to_3d"] is False and classic_data["battle_place"] == "monster"
+                            # Fought on the road, with the character already at the destination.
+                            assert outcome == "ambush" and session.battle_place == "road"
+                            assert read(client)["battle_place"] == "road"
+                            assert read(client)["location_name"] == there["name"]
         assert fired > 50
 
     def test_victory_ends_the_journey_and_she_does_not_come_back(self, client, monkeypatch):
@@ -363,7 +372,7 @@ class TestAmbush:
 
 
 class TestJournal:
-    def test_every_stage_and_the_classic_page(self, client):
+    def test_every_stage_and_the_function(self, client):
         first, second, third = list(QUESTS)[:3]
         stages = [(defeated, {}) for defeated in PREFIXES]
         stages.append((ORDER[:3], {
@@ -382,25 +391,25 @@ class TestJournal:
             assert [s["name"] for s in journal["shards"] if s["found"]] == [
                 s for s in rules.all_shards(BOSSES) if s in rules.collected_shards(BOSSES, defeated)]
 
-            page = client.get("/game/journal").text
-            shown = text_of(page)
-            assert journal["campaign"]["title"] in shown
-            for act in journal["acts"]:
-                if act["locked"]:
-                    continue
-                for value in (act["title"], act["description"], act["main_quest"]):
-                    assert value in shown
-                for boss in act["bosses"]:
-                    assert boss["name"] in shown and boss["where"] in shown and f"Lvl {boss['level']}" in shown
-            for shard in journal["shards"]:
-                if shard["found"]:
-                    assert shard["name"] in shown
-            boxes = re.findall(r'<span class="label">([^<]*)</span><span class="value">(\d+)</span>', page)
-            assert boxes == [("Monsters Slain", str(journal["stats"]["kills"])), ("Bosses Felled", str(journal["stats"]["bosses"])),
-                             ("Events", str(journal["stats"]["events"])), ("Quests Done", str(journal["stats"]["quests"]))]
+            assert journal == travel.journal_view(session_of(before))
+            assert journal["campaign"]["title"] == CAMPAIGN["title"]
+            unlocked = rules.highest_unlocked_act(CAMPAIGN, defeated)
+            for act, told in zip(CAMPAIGN["acts"], journal["acts"]):
+                assert told["locked"] is (act["number"] > unlocked)
+                assert (told["title"], told["description"], told["main_quest"]) == (
+                    act["title"], act["description"], act["mainQuest"])
+                for boss in told["bosses"]:
+                    # A locked act names nobody; an open one names every boss and where it waits.
+                    assert (boss["name"] == "???" and boss["where"] == "Unknown") is told["locked"]
+                    assert told["locked"] or boss["name"] in [b["name"] for b in BOSSES.values()]
+                    assert boss["defeated"] is (told["complete"] or boss["defeated"])
+            assert sum(s["found"] for s in journal["shards"]) == len(rules.collected_shards(BOSSES, defeated))
+            assert journal["stats"] == {"kills": more.get("monster_kills", 0), "bosses": len(defeated),
+                                        "events": more.get("events_resolved", 0),
+                                        "quests": len(more.get("completed_quests", []))}
             for quest in journal["active_quests"]:
-                assert quest["name"] in shown
-                assert ("Ready to turn in" if quest["ready"] else f"{quest['progress']} / {quest['target']}") in shown
+                assert quest["name"] in [q["name"] for q in QUESTS.values()]
+                assert quest["ready"] is (quest["progress"] >= quest["target"])
             assert len(journal["active_quests"]) == len(more.get("active_quests", {}))
 
     def test_the_shards_along_the_campaign(self, client):
@@ -432,13 +441,14 @@ class TestEnding:
             whole = rules.is_campaign_complete(CAMPAIGN, defeated)
             assert whole is (len([b for b in defeated if b != "Lady Vex"]) == 8)
             answer = client.get("/api/ending")
-            classic = client.get("/game/ending", follow_redirects=False)
             if not whole:
                 refused(answer, 409, "not_complete", "The crown is not yet whole.")
-                assert (classic.status_code, classic.headers["location"]) == (303, "/game")
+                with pytest.raises(fight.Rejected) as rejection:
+                    travel.ending_view(session_of(before))
+                assert (rejection.value.code, rejection.value.message) == ("not_complete", "The crown is not yet whole.")
                 assert session_file(client).read_bytes() == before
                 continue
-            assert answer.status_code == 200 and classic.status_code == 200
+            assert answer.status_code == 200
             character = read(client)["character"]
             state = client.get("/api/state").json()
             assert answer.json()["ending"] == {
@@ -451,15 +461,13 @@ class TestEnding:
                 "shards": ["Shard of Verdance", "Shard of Embers", "Shard of Tides", "Shard of Gales", "Shard of Stone"],
             }
             assert answer.json()["state"] == state
-            shown = text_of(classic.text)
-            for paragraph in self.PARAGRAPHS:
-                assert paragraph in shown
+            assert answer.json()["ending"] == travel.ending_view(session_of(before))
+            for paragraph, source in zip(answer.json()["ending"]["paragraphs"], travel.EPILOGUE, strict=True):
+                assert paragraph == source.format(name="Tester", race="Human", class_name="Fighter")
             assert session_file(client).read_bytes() == before
             assert state["has_character"] is True and state["character"]["name"] == "Tester"
 
     def test_the_epilogue_is_one_text(self):
-        from web import travel
-
         assert [p.format(name="Tester", race="Human", class_name="Fighter") for p in travel.EPILOGUE] == self.PARAGRAPHS
 
 

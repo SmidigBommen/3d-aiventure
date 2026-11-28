@@ -1,4 +1,4 @@
-"""JSON API of a fight in the 3D world. Every action is the function of web/fight.py that the classic route calls."""
+"""JSON API of a fight in the 3D world. Every action is a function of web/fight.py."""
 
 import json
 

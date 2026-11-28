@@ -62,7 +62,7 @@ export function itemTitle(item: InventoryItem): string {
   return item.count > 1 ? `${item.name} ×${item.count}` : item.name;
 }
 
-/** The lines under an item's name, as the classic inventory page. */
+/** The lines under an item's name. */
 export function itemLines(item: InventoryItem): string[] {
   const lines: string[] = [];
   if (item.type === 'weapon') {

@@ -61,7 +61,7 @@ export type BattleAction =
 
 const ITEM_KEYS: Record<string, string> = { KeyQ: 'q', KeyW: 'w', KeyE: 'e', KeyR: 'r' };
 
-/** The action a key (by `KeyboardEvent.code`) asks for in this fight, or null: the classic battle hotkeys. */
+/** The action a key (by `KeyboardEvent.code`) asks for in this fight, or null: A/D/F, 1-5 for abilities, Q/W/E/R for items. */
 export function actionForKey(view: BattleView, code: string): BattleAction | null {
   if (view.phase !== 'fight' || !view.player_turn) return null;
   if (code === 'KeyA') return { type: 'attack' };

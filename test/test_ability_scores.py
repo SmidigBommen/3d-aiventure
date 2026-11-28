@@ -206,19 +206,23 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import web.game_session as game_session  # noqa: E402
+from web import creation, save_manager  # noqa: E402
 from web.app import app  # noqa: E402
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(game_session, "SESSIONS_DIR", tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(game_session, "SESSIONS_DIR", sessions)
+    monkeypatch.setattr(save_manager, "SAVES_DIR", tmp_path / "saves")
     with TestClient(app) as c:
-        c.post("/character/race", data={"race": "Human"})
-        c.post("/character/class", data={"class_name": "Rogue"})
-        c.post("/character/create", data={
-            "name": "Tester", "weapon": "Rapier", "armor": "Leather",
+        response = c.post("/api/new-game", json={
+            "race": "Human", "class_name": "Rogue", "name": "Tester",
+            "weapon": "Rapier", "armor": "Leather", "portrait": creation.PORTRAITS[0]["path"],
             "skills": ["Stealth", "Perception", "Acrobatics", "Deception"]})
-        c.path = next(tmp_path.glob("*.json"))
+        assert response.status_code == 200
+        c.path = next(sessions.glob("*.json"))
         yield c
 
 
@@ -232,41 +236,54 @@ def _set_level(client, level):
     client.path.write_text(json.dumps(data), encoding="utf-8")
 
 
+def _refused(response, status, code):
+    assert response.status_code == status, response.text
+    assert response.json()["error"] == code
+
+
 class TestImproveRoute:
     def test_sheet_has_no_improve_buttons_without_points(self, client):
-        page = client.get("/character/summary").text
-        assert "/character/improve" not in page
-        assert "nav-badge" not in page
+        answer = client.get("/api/character").json()
+        assert answer["sheet"]["improvable"] == [] and answer["sheet"]["asi_points"] == 0
+        assert answer["state"]["asi_points"] == 0
+        _refused(client.post("/api/character/improve", json={"ability": "dexterity"}), 409, "no_points")
+        assert _load(client)["character"]["ability_increases"] == {}
 
     def test_sheet_offers_points_at_level_four(self, client):
         _set_level(client, 4)
-        page = client.get("/character/summary").text
-        assert "2 points to spend" in page
-        assert page.count('action="/character/improve"') == 6
-        assert "nav-badge" in page
+        answer = client.get("/api/character").json()
+        assert answer["sheet"]["asi_points"] == 2
+        assert len(answer["sheet"]["improvable"]) == 6
+        assert answer["state"]["asi_points"] == 2
 
     def test_spending_points_persists_and_updates_ac(self, client):
         _set_level(client, 4)
         before = _load(client)["character"]
         assert (before["dexterity_score"], before["armor_class"]) == (15, 13)
         for _ in range(2):
-            response = client.post("/character/improve", data={"ability": "dexterity"},
-                                   follow_redirects=False)
-            assert response.headers["location"] == "/character/summary"
+            response = client.post("/api/character/improve", json={"ability": "dexterity"})
+            assert response.status_code == 200
         after = _load(client)["character"]
         assert after["dexterity_score"] == 17 and after["dexterity_modifier"] == 3
         assert after["armor_class"] == 14
         assert after["ability_increases"] == {"dexterity": 2}
         assert after["asi_points"] == 0
-        page = client.get("/character/summary").text
-        assert "Dexterity is now 17" in page
-        assert "/character/improve" not in page
+        answer = response.json()
+        assert "Dexterity is now 17" in answer["message"]
+        assert answer["sheet"]["improvable"] == [] and answer["state"]["asi_points"] == 0
+        assert (answer["sheet"]["dexterity_score"], answer["sheet"]["armor_class"]) == (17, 14)
 
     def test_cannot_overspend(self, client):
         _set_level(client, 4)
-        for _ in range(5):
-            client.post("/character/improve", data={"ability": "strength"})
+        statuses = [client.post("/api/character/improve", json={"ability": "strength"}).status_code
+                    for _ in range(5)]
+        assert statuses == [200, 200, 409, 409, 409]
         assert _load(client)["character"]["ability_increases"] == {"strength": 2}
+
+    def test_unknown_ability_is_refused(self, client):
+        _set_level(client, 4)
+        _refused(client.post("/api/character/improve", json={"ability": "luck"}), 404, "no_such_ability")
+        assert _load(client)["character"]["ability_increases"] == {}
 
     def test_old_save_without_increases_gets_its_points(self, client):
         data = _load(client)
@@ -274,11 +291,12 @@ class TestImproveRoute:
         data["character"].pop("ability_increases")
         data["character"]["armor_class"] = 99       # stale value from an old save
         client.path.write_text(json.dumps(data), encoding="utf-8")
-        client.get("/character/summary")
-        client.post("/character/improve", data={"ability": "constitution"})
+        assert client.get("/api/character").json()["sheet"]["asi_points"] == 4
+        client.post("/api/character/improve", json={"ability": "constitution"})
         char = _load(client)["character"]
         assert char["asi_points"] == 3
         assert char["armor_class"] == 13
 
     def test_class_page_shows_training(self, client):
-        assert "+4 DEX, +2 INT" in client.get("/character/class").text
+        classes = {entry["name"]: entry for entry in client.get("/api/creation").json()["classes"]}
+        assert classes["Rogue"]["ability_bonuses"] == {"dexterity": 4, "intelligence": 2}

@@ -87,10 +87,9 @@ async def search(request: Request):
 
 @router.post("/engage")
 async def engage(request: Request):
-    """Meet the monster, event or boss with this id. Answers where the encounter goes on, and the fight when it is one."""
-    # Imported here: the battle routes import web.world, which this module imports too.
+    """Meet the monster, event or boss with this id. Answers the fight or the event it starts."""
+    # Imported here: web.fight imports web.world, which this module imports too.
     from web import events, fight
-    from web.routes.battle import begin_boss_battle, begin_monster_battle, opened
 
     session = get_session(request)
     if not session.character:
@@ -111,25 +110,19 @@ async def engage(request: Request):
     event = contents.get("event")
     boss = world.area_boss(session) if contents else None
     if monster and monster["id"] == content_id:
-        session.return_to_3d = True
         session.engaged_monster = world.take_monster(session)
-        answer = await opened(request, session, begin_monster_battle(session, session.engaged_monster))
-        url = answer.headers["location"]
+        fight.opened(session, fight.begin_monster_battle(session, session.engaged_monster))
     elif event and event["id"] == content_id:
-        session.return_to_3d = True
         session.engaged_monster = None
         session.pending_event = world.take_event(session)
         save_session(request, session)
-        return {"url": "/game/event", "state": world.world_state(session), "battle": None,
-                "event": events.event_view(session)}
+        return {"state": world.world_state(session), "battle": None, "event": events.event_view(session)}
     elif boss and boss["id"] == content_id:
         if boss["locked"]:
             return _refuse(409, "locked", boss["locked_text"])
-        session.return_to_3d = True
         session.engaged_monster = None
-        answer = await opened(request, session, begin_boss_battle(session, content_id))
-        url = answer.headers["location"]
+        fight.opened(session, fight.begin_boss_battle(session, content_id))
     else:
         return _refuse(404, "not_here", "That is not here any more.")
-    return {"url": url, "state": world.world_state(session), "battle": fight.battle_view(session),
-            "event": None}
+    save_session(request, session)
+    return {"state": world.world_state(session), "battle": fight.battle_view(session), "event": None}

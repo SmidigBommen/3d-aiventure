@@ -54,7 +54,6 @@ def _make_session():
     session.completed_quests = ["q0"]
     session.monster_kills = 12
 
-    session.set_flash("test_msg", "hello")
     session.battle_rewards = {"xp": 100}
 
     return session
@@ -200,19 +199,32 @@ class TestSaveCount:
 
 
 class TestEphemeralFieldsCleared:
-    def test_flash_cleared_in_save(self):
+    def test_rewards_cleared_in_save(self):
         session = _make_session()
-        assert session.pop_flash("test_msg") == "hello"
+        assert session.battle_rewards == {"xp": 100}
 
-        session.set_flash("test_msg", "hello again")
         created = save_manager.create_save(session)
 
-        # Read raw file to check _flash is empty
+        # Read raw file to check the rewards are gone and no flash is written
         path = save_manager._save_file(created["save_id"])
         with open(path) as f:
             raw = json.load(f)
-        assert raw["session_data"]["_flash"] == {}
+        assert "_flash" not in raw["session_data"]
         assert raw["session_data"]["battle_rewards"] is None
+
+    def test_save_with_removed_keys_still_loads(self):
+        """A save written while the classic interface existed carries keys the session no longer has."""
+        created = save_manager.create_save(_make_session())
+        path = save_manager._save_file(created["save_id"])
+        with open(path) as f:
+            raw = json.load(f)
+        raw["session_data"].update(return_to_3d=True, haggle_result={"roll": 12}, _flash={"test_msg": "hello"})
+        with open(path, "w") as f:
+            json.dump(raw, f)
+
+        loaded = save_manager.load_save(created["save_id"])
+        assert loaded is not None and loaded.character.gold == 100
+        assert not {"return_to_3d", "haggle_result", "_flash"} & set(loaded.to_dict())
 
 
 class TestGetSaveMetadata:

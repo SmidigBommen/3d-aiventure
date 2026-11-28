@@ -10,8 +10,9 @@ Live at https://aiventure3d.smidigbommen.no.
 
 ## Status
 
-The game is being rebuilt screen by screen. What is not in 3D yet opens in the original
-server-rendered interface at `/classic`, on the same saved game.
+The game is complete in 3D: character creation, the eight locations, fights, events, the shop and
+its quests, travel, saves and the ending are all played in the first-person client. The original
+server-rendered interface is removed; a link to one of its old pages leads to the game.
 
 ## Run it
 

@@ -235,8 +235,9 @@ export function showResult(view: BattleView): void {
     const rise = h('button', 'btn', cost > 0 ? `Rise Again (-${cost} gold)` : 'Rise Again') as HTMLButtonElement;
     rise.type = 'button';
     rise.id = 'battle-revive';
-    const over = h('a', 'btn btn-quiet', 'Start Over') as HTMLAnchorElement;
-    over.href = '/character/new';
+    const over = h('button', 'btn btn-quiet', 'Start Over') as HTMLButtonElement;
+    over.type = 'button';
+    over.id = 'battle-restart';
     panel.className = 'panel result-defeat';
     panel.replaceChildren(
       h('h2', '', 'Defeat'),
@@ -256,7 +257,7 @@ export function hideResult(): void {
 }
 
 /** What the buttons do: the same handlers the keys run. */
-export function bindBattlePanel(handlers: { act: (action: BattleAction) => void; proceed: () => void; revive: () => void }): void {
+export function bindBattlePanel(handlers: { act: (action: BattleAction) => void; proceed: () => void; revive: () => void; restart: () => void }): void {
   el('battle-actions').addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-action]');
     if (button && !button.disabled) handlers.act(JSON.parse(button.dataset.action as string) as BattleAction);
@@ -265,5 +266,6 @@ export function bindBattlePanel(handlers: { act: (action: BattleAction) => void;
     const button = (event.target as HTMLElement).closest('button');
     if (button?.id === 'battle-continue') handlers.proceed();
     else if (button?.id === 'battle-revive') handlers.revive();
+    else if (button?.id === 'battle-restart') handlers.restart();
   });
 }
