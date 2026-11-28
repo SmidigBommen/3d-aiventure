@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import {
-  fetchBattle, fetchCharacter, fetchEnding, fetchEvent, fetchJournal, fetchShop, fetchState, fetchTravel, postBattle, postBattleContinue, postBattleRevive,
-  postEngage, postEnter, postEventChoose, postEventContinue, postImprove, postInventory, postMove, postRest, postSearch, postShopItem, postShopQuest,
-  postTravel, postUnequip,
+  fetchBattle, fetchCharacter, fetchCreation, fetchEnding, fetchEvent, fetchJournal, fetchPreview, fetchSaves, fetchShop, fetchState, fetchTravel,
+  postBattle, postBattleContinue, postBattleRevive, postEngage, postEnter, postEventChoose, postEventContinue, postImprove, postInventory, postMove,
+  postNewGame, postRest, postSave, postSearch, postShopItem, postShopQuest, postTravel, postUnequip,
   type Ambush, type CharacterAnswer, type ShopAnswer, type WorldState,
 } from './api';
 import { buildBattleScene, type BattleScene, type Rage } from './battle/battleScene';
@@ -11,8 +11,18 @@ import { fxLook } from './battle/fx';
 import { bindBattlePanel, flash, floatText, renderBattle, setHp, showBanner, showBattlePanel, showEnrage, showResult } from './battle/panel';
 import { buildTimeline, type Cue, type Finale, type Timeline } from './battle/timeline';
 import { actionForKey, type BattleAction, type BattleView } from './battle/view';
+import {
+  chooseClass, chooseRace, emptyChoices, nextStep, prevStep, requestBody, stepComplete, toggleSkill,
+  type Choices, type CreationStep, type CreationView, type Opening, type PreviewView,
+} from './creation';
 import { buildEndingScene } from './endingScene';
 import type { Vec2 } from './input/movement';
+import type { SavesView } from './saves';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, parseSettings, serializeSettings, settingsTurn, type Settings } from './settings';
+import {
+  bindCreationPanel, bindOpeningPanel, bindSavesPanel, bindSettingsPanel, forgetCreationStep, renderCreation, renderSaves, renderSettings,
+  showCreationFoot, showCreationPanel, showOpening, showSavesPanel, showSettingsPanel, type SaveConfirm, type SavesMode, type SlotAction,
+} from './startPanel';
 import { buildTitleScene } from './titleScene';
 import { fade, hideHud, hideNotice, hideTitle, showHud, showLoading, showMenu, showNotice, showPrompt, showRoadHud, showTitle, veil } from './ui';
 import { buildAreaScene, type AreaScene } from './world/areaScene';
@@ -37,9 +47,9 @@ import { panelForKey, type InventoryView, type PanelKind, type SheetView } from 
 import { bindSheetPanels, renderInventory, renderSheet, showSheetPanel, type PanelMessage } from './world/sheetPanel';
 import { haggleFeedback, killAnnouncement, readyCount, tabForKey, type ShopTab, type ShopView } from './world/shop';
 import { bindShopPanel, renderShop, showHaggle, showShopPanel, type HaggleShown } from './world/shopPanel';
-import { heldKeys, mouseTurn, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
+import { heldKeys, moveKey, turnTowards, turnView, walkStep, type View } from './world/walk';
 
-type Screen = 'title' | 'world' | 'pending' | 'battle' | 'event' | 'intro' | 'ending';
+type Screen = 'title' | 'creation' | 'opening' | 'world' | 'pending' | 'battle' | 'event' | 'intro' | 'ending';
 /** The panels that open over the world while `screen` stays 'world'. */
 type OpenPanel = PanelKind | 'shop' | 'travel' | 'journal';
 
@@ -54,6 +64,21 @@ interface Store {
   view: ShopView;
   tab: ShopTab;
   haggle: HaggleShown | null;
+}
+
+/** Character creation: what the server offers, the step shown, the choices so far and the server's preview of them. */
+interface Maker {
+  view: CreationView;
+  step: CreationStep;
+  choices: Choices;
+  preview: PreviewView | null;
+}
+
+/** The save slots while their panel is open. `confirm`: the question that waits for Yes or No. */
+interface Slots {
+  view: SavesView;
+  mode: SavesMode;
+  confirm: SaveConfirm | null;
 }
 
 /** A fight in the world: the view the server last answered and where its playback stands. */
@@ -82,7 +107,10 @@ interface Fight {
 // `arrival` is what #arrival shows while it shows, `compass` the marks of the last frame while walking.
 // `road` is true while the road of an ambush is the scene: there `contents`, `interaction` and `compass`
 // are null and `state` is already the destination. During the epilogue `screen` is 'ending' and `ending`
-// holds the view and the step shown.
+// holds the view and the step shown. Before the world: `screen` is 'creation' while the character is made
+// (`creation` holds the step, the choices and the server's preview) and 'opening' while the opening is read.
+// `saves` is the save slots while their panel is open (from the menu, or from the title screen to load),
+// `settings` the settings in use and `settingsOpen` whether their panel is on screen.
 declare global {
   interface Window {
     __aiv: {
@@ -115,6 +143,11 @@ declare global {
       readonly inventory: InventoryView | null;
       readonly sheet: SheetView | null;
       readonly resting: boolean;
+      readonly creation: { step: CreationStep; choices: Choices; preview: PreviewView | null } | null;
+      readonly opening: Opening | null;
+      readonly saves: Slots | null;
+      readonly settings: Settings;
+      readonly settingsOpen: boolean;
       lookAt: (x: number, z: number) => void;
       interact: () => void;
     };
@@ -126,7 +159,17 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
 const title = buildTitleScene();
-const eye = new THREE.PerspectiveCamera(70, 1, 0.1, 400);
+// The settings live in this browser only.
+function storedSettings(): Settings {
+  try {
+    return parseSettings(localStorage.getItem(SETTINGS_KEY));
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+let settings = storedSettings();
+let settingsOpen = false;
+const eye = new THREE.PerspectiveCamera(settings.fov, 1, 0.1, 400);
 eye.rotation.order = 'YXZ';
 
 let screen: Screen = 'title';
@@ -185,6 +228,17 @@ let compass: CompassMark[] | null = null;
 let ending: { view: EndingView; step: number } | null = null;
 let epilogue: ReturnType<typeof buildEndingScene> | null = null; // the scene behind the ending
 
+// Before the world, and the save slots.
+let maker: Maker | null = null; // character creation, while its panel is open
+let makerMessage: PanelMessage | null = null;
+let makerLocked = false; // the new game is on its way to the server
+let opening: Opening | null = null; // what the opening panel shows
+let saveCount = 0; // how many saves the server last listed: the title screen offers Load game by it
+let slots: Slots | null = null;
+let slotsFrom: 'menu' | 'title' = 'menu';
+let slotsMessage: PanelMessage | null = null;
+let slotsLocked = false; // a save, a load or a delete is on its way to the server
+
 const inWorld = (): boolean => screen === 'world' && layout !== null;
 // A panel is open over the area: the player stands where they stood and nothing walks.
 const inPanel = (): boolean => (screen === 'event' || screen === 'intro') && layout !== null;
@@ -232,6 +286,11 @@ window.__aiv = {
   get inventory() { return character?.inventory ?? null; },
   get sheet() { return character?.sheet ?? null; },
   get resting() { return resting; },
+  get creation() { return screen === 'creation' && maker ? { step: maker.step, choices: maker.choices, preview: maker.preview } : null; },
+  get opening() { return screen === 'opening' ? opening : null; },
+  get saves() { return slots; },
+  get settings() { return settings; },
+  get settingsOpen() { return settingsOpen; },
   get travel() { return atlas; },
   get journal() { return journal; },
   get arrival() { return arrival; },
@@ -266,6 +325,9 @@ function leaveWorld(): void {
   showBossIntro(null);
   closePanel();
   closeEnding();
+  closeCreation();
+  opening = null;
+  showOpening(null);
   hideArrival();
   road = false;
   ambush = null;
@@ -398,7 +460,7 @@ function apply(next: WorldState | null, keepWalking: boolean): void {
   }
   leaveWorld();
   screen = next?.pending ? 'pending' : 'title';
-  showTitle(next);
+  showTitle(next, saveCount);
 }
 
 // Where the player stood when an encounter was started, kept for the way back from the classic pages.
@@ -445,7 +507,10 @@ async function refresh(): Promise<void> {
   const sameArea = (next: WorldState): boolean =>
     wasWalking && !road && next.area?.id === state?.area?.id && next.location?.name === state?.location?.name && !next.pending;
   try {
-    let next = await fetchState();
+    // The title screen offers Load game when there is a save.
+    const [first, listed] = await Promise.all([fetchState(), fetchSaves()]);
+    let next = first;
+    if (listed.ok) saveCount = listed.saves.saves.length;
     const walkable = next.has_character && !next.pending && next.location !== null && next.area !== null;
     const saved = savedReturn();
     const matches = saved !== null && saved.location === next.location?.name && saved.area === next.area?.id;
@@ -1366,6 +1431,311 @@ async function interact(): Promise<void> {
   else if (hit.id !== null) await engage(hit.id);
 }
 
+// --- the beginning: creation, the opening and Continue ---------------------------------------------
+
+function drawCreation(): void {
+  if (maker) renderCreation(maker.view, maker.step, maker.choices, maker.preview, makerMessage, makerLocked);
+}
+
+function closeCreation(): void {
+  maker = null;
+  makerMessage = null;
+  makerLocked = false;
+  showCreationPanel(false);
+}
+
+/** Asks the server what the race and class chosen make; the client computes none of it. */
+async function askPreview(): Promise<void> {
+  if (!maker) return;
+  const mine = maker;
+  const { race, class_name: className } = mine.choices;
+  if (!race || !className) return;
+  if (mine.preview?.race === race && mine.preview.class_name === className) return;
+  mine.preview = null;
+  drawCreation();
+  const answer = await fetchPreview(race, className);
+  if (maker !== mine || mine.choices.race !== race || mine.choices.class_name !== className) return;
+  if (!answer.ok) return;
+  mine.preview = answer.preview;
+  drawCreation();
+}
+
+/** New game on the title screen: the creation steps over the title scene. */
+async function openCreation(): Promise<void> {
+  if (screen !== 'title' || busy || slots) return;
+  busy = true;
+  const answer = await fetchCreation();
+  busy = false;
+  if (screen !== 'title') return;
+  if (!answer.ok) {
+    showTitle(null);
+    return;
+  }
+  maker = { view: answer.creation, step: 'race', choices: emptyChoices(), preview: null };
+  makerMessage = null;
+  makerLocked = false;
+  screen = 'creation';
+  hideTitle();
+  forgetCreationStep();
+  showCreationPanel(true);
+  drawCreation();
+}
+
+/** A card of the step shown was clicked. */
+function creationChoose(value: string): void {
+  if (!maker || makerLocked) return;
+  const { view: offered, step, choices } = maker;
+  if (step === 'race') maker.choices = chooseRace(choices, value);
+  else if (step === 'class') maker.choices = chooseClass(choices, offered, value);
+  else if (step === 'skills') maker.choices = toggleSkill(choices, offered, value);
+  else if (step === 'weapon') maker.choices = { ...choices, weapon: value };
+  else if (step === 'armour') maker.choices = { ...choices, armor: value === '' ? null : value };
+  else if (step === 'portrait') maker.choices = { ...choices, portrait: value };
+  else return;
+  makerMessage = null;
+  drawCreation();
+  void askPreview();
+}
+
+function creationName(text: string): void {
+  if (!maker || makerLocked) return;
+  maker.choices = { ...maker.choices, name: text };
+  // The field keeps its caret: only the Next button is shown anew.
+  showCreationFoot(maker.view, maker.step, maker.choices, makerLocked);
+}
+
+/** Back (Esc): the step before, and from the first one the title screen. Every choice is kept on the way. */
+function creationBack(): void {
+  if (!maker || makerLocked) return;
+  const before = prevStep(maker.step);
+  if (before === null) {
+    closeCreation();
+    screen = 'title';
+    showTitle(state, saveCount);
+    return;
+  }
+  maker.step = before;
+  makerMessage = null;
+  drawCreation();
+}
+
+/** Next (Enter): on from a complete step; on the summary the character is made and the new game starts. */
+async function creationNext(): Promise<void> {
+  if (!maker || makerLocked) return;
+  const mine = maker;
+  if (mine.step !== 'summary') {
+    const after = nextStep(mine.step, mine.choices, mine.view);
+    if (after === mine.step) return;
+    mine.step = after;
+    makerMessage = null;
+    drawCreation();
+    return;
+  }
+  if (!stepComplete('summary', mine.choices, mine.view)) return;
+  makerLocked = true;
+  makerMessage = null;
+  drawCreation();
+  const answer = await postNewGame(requestBody(mine.choices));
+  if (maker !== mine) return;
+  makerLocked = false;
+  if (!answer.ok) {
+    makerMessage = { text: answer.message, refused: true };
+    drawCreation();
+    return;
+  }
+  closeCreation();
+  forgetReturn();
+  state = answer.state;
+  opening = answer.opening;
+  screen = 'opening';
+  showOpening(opening);
+  (document.activeElement as HTMLElement | null)?.blur();
+}
+
+bindCreationPanel({ choose: creationChoose, name: creationName, back: creationBack, next: () => void creationNext() });
+bindOpeningPanel({
+  proceed: () => {
+    // The button keeps no focus, so that Space and Enter are not a click as well.
+    (document.activeElement as HTMLElement | null)?.blur();
+    void enterGame();
+  },
+});
+
+/** Continue on the title screen and after the opening: into the area the character stands in. */
+async function enterGame(): Promise<void> {
+  const from = screen;
+  if ((from !== 'title' && from !== 'opening') || !state || !state.has_character || state.pending || busy || slots) return;
+  busy = true;
+  // Arriving: the server rolls what the area holds when it has not yet.
+  const [arrived] = await Promise.all([postEnter(), fontReady()]);
+  busy = false;
+  if (screen !== from || loading) return;
+  if (from === 'opening') {
+    opening = null;
+    showOpening(null);
+    screen = 'title';
+  }
+  if (!arrived.ok) {
+    await refresh();
+  } else if (arrived.state.pending || !arrived.state.area) {
+    apply(arrived.state, false);
+  } else {
+    void enterArea(arrived.state, null);
+  }
+}
+
+// --- the save slots, the settings and the way back to the title ------------------------------------
+
+function drawSaves(): void {
+  if (slots) renderSaves(slots.view, slots.mode, slots.confirm, slotsMessage, slotsLocked);
+}
+
+/** Whether the save slots or the settings can open from where the player is: the menu, or the title screen. */
+const menuShown = (): boolean => inWorld() && menuOpen && !slots && !settingsOpen;
+const titleShown = (): boolean => screen === 'title' && !busy && !loading && !slots;
+
+/** Opens the save slots: from the menu to save or load, from the title screen to load. */
+async function openSaves(mode: SavesMode): Promise<void> {
+  const from = screen === 'title' ? 'title' : 'menu';
+  const allowed = from === 'title' ? titleShown : menuShown;
+  if (!allowed()) return;
+  const answer = await fetchSaves();
+  if (!allowed()) return;
+  if (!answer.ok) {
+    if (from === 'menu') showNotice(answer.message);
+    return;
+  }
+  saveCount = answer.saves.saves.length;
+  slots = { view: answer.saves, mode, confirm: null };
+  slotsFrom = from;
+  slotsMessage = null;
+  slotsLocked = false;
+  if (from === 'title') hideTitle();
+  else showMenu(false);
+  showSavesPanel(true);
+  drawSaves();
+}
+
+/** Takes the save slots off the screen. `back`: to where they were opened from, the menu or the title screen. */
+function closeSaves(back = true): void {
+  if (!slots) return;
+  slots = null;
+  slotsMessage = null;
+  slotsLocked = false;
+  showSavesPanel(false);
+  if (!back) return;
+  if (slotsFrom === 'title') showTitle(state, saveCount);
+  else showMenu(true);
+}
+
+/** A button of a slot: "Overwrite" and "Delete" ask first, "Save here" and "Load" act at once. */
+function slotPressed(action: SlotAction, id: string | null): void {
+  if (!slots || slotsLocked || slots.confirm) return;
+  if ((action === 'overwrite' || action === 'delete') && id !== null) {
+    slots.confirm = { action, id };
+    slotsMessage = null;
+    drawSaves();
+    return;
+  }
+  void slotSend(action, id);
+}
+
+async function slotSend(action: SlotAction, id: string | null): Promise<void> {
+  if (!slots || slotsLocked) return;
+  const mine = slots;
+  slotsLocked = true;
+  mine.confirm = null;
+  drawSaves();
+  const answer = await postSave(action === 'overwrite' ? 'save' : action, id);
+  if (slots !== mine) return;
+  if (!answer.ok) {
+    // The slots are everybody's: show them as they are now.
+    const now = await fetchSaves();
+    if (slots !== mine) return;
+    if (now.ok) mine.view = now.saves;
+  } else {
+    mine.view = answer.saves;
+  }
+  saveCount = mine.view.saves.length;
+  slotsLocked = false;
+  slotsMessage = { text: answer.message, refused: !answer.ok };
+  drawSaves();
+  if (answer.ok && action === 'load' && answer.state) await resumeLoaded(answer.state, answer.message);
+}
+
+/** After a load: on as a page load with that session goes on, into the area or into what is pending. */
+async function resumeLoaded(next: WorldState, message: string): Promise<void> {
+  forgetReturn();
+  closeSaves(false);
+  leaveWorld();
+  screen = 'title';
+  hideHud();
+  state = next;
+  if (!next.pending && next.area) {
+    busy = true;
+    const [arrived] = await Promise.all([postEnter(), fontReady()]);
+    busy = false;
+    if (screen !== 'title') return;
+    if (arrived.ok && !arrived.state.pending && arrived.state.area) {
+      await enterArea(arrived.state, null);
+      showNotice(message);
+      return;
+    }
+  }
+  await refresh();
+}
+
+bindSavesPanel({
+  act: slotPressed,
+  yes: () => {
+    if (slots?.confirm) void slotSend(slots.confirm.action, slots.confirm.id);
+  },
+  no: () => {
+    if (!slots || slotsLocked) return;
+    slots.confirm = null;
+    drawSaves();
+  },
+  close: () => closeSaves(),
+});
+
+/** A change in the settings panel: in use and in the browser's storage at once. */
+function useSettings(next: Settings): void {
+  settings = next;
+  eye.fov = next.fov;
+  eye.updateProjectionMatrix();
+  try {
+    localStorage.setItem(SETTINGS_KEY, serializeSettings(next));
+  } catch {
+    /* no storage: the settings last until the page is left */
+  }
+  renderSettings(settings);
+}
+
+function openSettings(): void {
+  if (!menuShown()) return;
+  settingsOpen = true;
+  showMenu(false);
+  renderSettings(settings);
+  showSettingsPanel(true);
+}
+
+function closeSettings(back = true): void {
+  if (!settingsOpen) return;
+  settingsOpen = false;
+  showSettingsPanel(false);
+  if (back) showMenu(true);
+}
+
+bindSettingsPanel({ change: useSettings, close: () => closeSettings() });
+
+/** Quit to title: nothing is sent; the session keeps its character, so Continue is offered. */
+function quitToTitle(): void {
+  if (!menuShown()) return;
+  leaveWorld();
+  screen = 'title';
+  showTitle(state, saveCount);
+}
+
 // --- menu and input ----------------------------------------------------------------------------
 
 function requestLock(): void {
@@ -1380,6 +1750,9 @@ function requestLock(): void {
 
 function setMenu(open: boolean): void {
   menuOpen = open;
+  // The save slots and the settings are part of the menu: they go with it.
+  closeSaves(false);
+  closeSettings(false);
   showMenu(open);
   if (open) {
     held.clear();
@@ -1398,11 +1771,38 @@ document.addEventListener('pointerlockchange', () => {
 });
 document.addEventListener('mousemove', (event) => {
   if (document.pointerLockElement !== canvas || !inWorld() || menuOpen || heldStill()) return;
-  const t = mouseTurn(event.movementX, event.movementY);
+  const t = settingsTurn(event.movementX, event.movementY, settings);
   turn(t.dYaw, t.dPitch);
 });
 
 window.addEventListener('keydown', (event) => {
+  if (screen === 'creation') {
+    // Enter is Next and Esc is Back; every other key is for the name field.
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.code === 'Enter' || event.code === 'NumpadEnter' || event.code === 'Escape') {
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.code === 'Escape') creationBack();
+      else void creationNext();
+    }
+    return;
+  }
+  if (screen === 'opening') {
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
+    if (['Enter', 'NumpadEnter', 'Space'].includes(event.code)) {
+      event.preventDefault();
+      if (!event.repeat) void enterGame();
+    }
+    return;
+  }
+  if (slots || settingsOpen) {
+    // The save slots or the settings are open: Esc closes them; the arrow keys belong to the sliders.
+    if (event.code === 'Escape' && !event.repeat) {
+      if (slots) closeSaves();
+      else closeSettings();
+    }
+    return;
+  }
   if (screen === 'battle') {
     battleKey(event);
     return;
@@ -1493,21 +1893,14 @@ for (const [id, kind] of [['menu-inventory', 'inventory'], ['menu-character', 's
   });
 }
 
-document.getElementById('btn-continue')?.addEventListener('click', async () => {
-  if (!state || !state.has_character || state.pending || busy) return;
-  busy = true;
-  // Arriving: the server rolls what the area holds when it has not yet.
-  const [arrived] = await Promise.all([postEnter(), fontReady()]);
-  busy = false;
-  if (screen !== 'title' || loading) return;
-  if (!arrived.ok) {
-    await refresh();
-  } else if (arrived.state.pending || !arrived.state.area) {
-    apply(arrived.state, false);
-  } else {
-    void enterArea(arrived.state, null);
-  }
-});
+document.getElementById('menu-save')?.addEventListener('click', () => void openSaves('save'));
+document.getElementById('menu-load')?.addEventListener('click', () => void openSaves('load'));
+document.getElementById('menu-settings')?.addEventListener('click', () => openSettings());
+document.getElementById('menu-quit')?.addEventListener('click', () => quitToTitle());
+
+document.getElementById('btn-continue')?.addEventListener('click', () => void enterGame());
+document.getElementById('btn-new-game')?.addEventListener('click', () => void openCreation());
+document.getElementById('btn-load-game')?.addEventListener('click', () => void openSaves('load'));
 
 // --- frame loop --------------------------------------------------------------------------------
 

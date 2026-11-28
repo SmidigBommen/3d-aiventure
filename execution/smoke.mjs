@@ -3,6 +3,9 @@
 //   node execution/smoke.mjs --url URL --out DIR     against a server that is already running
 //   node execution/smoke.mjs --serve --out DIR       builds nothing, but starts its own server on a
 //                                                    free port with an empty data folder (run `pnpm build` first)
+// In both modes it makes its character in the creation panel of the 3D client (no classic creation route is
+// called), reads the opening, changes the settings and reloads, saves, loads and deletes a save from the menu
+// and quits to the title screen. With --url and ten saves on the server the save steps are skipped.
 // With --serve it also fights in the 3D world: a win, an ability and an item, a flight, a defeat with
 // Rise Again, and a reload in the middle of a fight; it plays events in the event panel (a success, a
 // failure, one that ends in a fight, a discovery at its landmark) and fights the first boss to the end.
@@ -25,7 +28,7 @@
 // Needs playwright-core (pnpm install) and a Chromium in ~/.cache/ms-playwright.
 import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -92,6 +95,8 @@ function watch(p, tolerate = () => false) {
   p.on('console', (m) => m.type() === 'error' && report(`console: ${m.text()} (${m.location().url})`));
   p.on('response', (r) => r.status() >= 400 && report(`${r.status()} ${r.url()}`));
   p.on('requestfailed', (r) => report(`request failed: ${r.url()}`));
+  // The character is made in the 3D client: nothing here goes to a classic creation route.
+  p.on('request', (r) => new URL(r.url()).pathname.startsWith('/character') && report(`a request to ${r.url()}`));
 }
 let page = await context.newPage();
 watch(page);
@@ -531,6 +536,298 @@ async function throughEnding(name, shotNames) {
   if (!after.has_character || after.character.name !== 'Smoke' || after.pending !== null) errors.push(`${name}: after the ending the state is ${JSON.stringify(after).slice(0, 200)}`);
 }
 
+/** In the page: the creation panel is at this step. */
+const atStep = (name) => window.__aiv.screen === 'creation' && window.__aiv.creation?.step === name;
+const choicesNow = () => page.evaluate(() => JSON.stringify(window.__aiv.creation.choices));
+
+/** One creation step: waits for it, checks that Next waits for a choice when `needed`, makes the choice, saves the screenshot. */
+async function creationStep(name, needed, choose) {
+  await page.waitForFunction(atStep, name, { timeout: 10000 });
+  const marked = await page.evaluate(() => document.querySelector('#creation-steps .current')?.dataset.step ?? null);
+  if (marked !== name) errors.push(`create-${name}: the step row marks ${marked}`);
+  if (needed) {
+    if (!(await page.isDisabled('#creation-next'))) errors.push(`create-${name}: Next is open before anything is chosen`);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    if (!(await page.evaluate(atStep, name))) errors.push(`create-${name}: Enter went on from an incomplete step`);
+  }
+  await choose();
+  await page.waitForFunction(() => !document.getElementById('creation-next').disabled, null, { timeout: 5000 }).catch(() => errors.push(`create-${name}: Next stays closed after the choice`));
+  await shot(`create-${name}`);
+}
+
+const pick = (value) => page.click(`#creation-body [data-value="${value}"]`);
+
+/** New game on the title screen, the eight creation steps for Human Fighter "Smoke", and Begin up to the opening. */
+async function createCharacter() {
+  const offered = await page.evaluate(() => fetch('/api/creation').then((r) => r.json()));
+  await page.click('#btn-new-game');
+  await page.waitForFunction(atStep, 'race', { timeout: 10000 });
+  if (await page.isVisible('#title-screen')) errors.push('create-race: the title panel stays behind the creation panel');
+  if ((await page.locator('#creation-steps .create-step').count()) !== 8) errors.push('create-race: the step row does not have eight steps');
+
+  await creationStep('race', true, async () => {
+    const cards = await page.locator('#creation-body [data-value]').count();
+    if (cards !== offered.races.length) errors.push(`create-race: ${cards} cards for ${offered.races.length} races`);
+    if (!(await page.isHidden('#creation-preview'))) errors.push('create-race: the preview shows before race and class are chosen');
+    await pick('Human');
+  });
+  await page.keyboard.press('Enter');
+
+  await creationStep('class', true, async () => {
+    const cards = await page.locator('#creation-body [data-value]').count();
+    if (cards !== offered.classes.length) errors.push(`create-class: ${cards} cards for ${offered.classes.length} classes`);
+    await pick('Fighter');
+    await page.waitForFunction(() => window.__aiv.creation.preview !== null && !document.getElementById('creation-preview').hidden, null, { timeout: 10000 });
+  });
+  const preview = await page.evaluate(() => window.__aiv.creation.preview);
+  const served = await page.evaluate(() => fetch('/api/creation/preview?race=Human&class_name=Fighter').then((r) => r.json()));
+  if (JSON.stringify(preview) !== JSON.stringify(served)) errors.push('create-class: the preview is not the one the server answers');
+  const box = await page.textContent('#creation-preview');
+  if (!box.includes(`Hit points ${served.hit_points}`) || !box.includes(`Power points ${served.power_points}`) || !box.includes(`Armour class ${served.unarmored_ac}`)) errors.push(`create-class: the preview reads "${box}"`);
+  await page.click('#creation-next');
+
+  await creationStep('skills', false, async () => {
+    await pick('Athletics');
+    await pick('Perception');
+    await pick('History'); // one more than a Fighter may choose: nothing happens
+    const seen = await page.evaluate(() => ({ skills: window.__aiv.creation.choices.skills, count: document.querySelector('.create-count').textContent }));
+    if (JSON.stringify(seen.skills) !== JSON.stringify(['Athletics', 'Perception']) || seen.count !== '2 / 2 chosen') errors.push(`create-skills: ${JSON.stringify(seen)}`);
+  });
+  await page.keyboard.press('Enter');
+
+  await creationStep('name', true, async () => {
+    const field = await page.evaluate(() => ({ max: document.getElementById('creation-name').maxLength, focused: document.activeElement?.id }));
+    if (field.max !== offered.name_max || field.focused !== 'creation-name') errors.push(`create-name: the field is ${JSON.stringify(field)}`);
+    await page.keyboard.type('Smoke');
+    if ((await page.evaluate(() => window.__aiv.creation.choices.name)) !== 'Smoke') errors.push('create-name: the typed name is not in the choices');
+  });
+  await page.keyboard.press('Enter');
+
+  await creationStep('weapon', true, async () => {
+    const cards = await page.locator('#creation-body [data-value]').count();
+    const fighter = offered.classes.find((c) => c.name === 'Fighter');
+    if (cards !== fighter.weapons.length) errors.push(`create-weapon: ${cards} cards for ${fighter.weapons.length} weapons`);
+    await pick('Longsword');
+  });
+  await page.keyboard.press('Enter');
+
+  await creationStep('armour', false, async () => {
+    if ((await page.evaluate(() => window.__aiv.creation.choices.armor)) !== null) errors.push('create-armour: the default is not "no armour"');
+    await pick('Chain Mail');
+    const ac = served.armors.find((a) => a.name === 'Chain Mail').total_ac;
+    const shown = await page.textContent('#creation-preview .create-ac');
+    if (shown !== `Armour class ${ac}`) errors.push(`create-armour: the preview shows "${shown}" for Chain Mail, the server says ${ac}`);
+  });
+  await page.keyboard.press('Enter');
+
+  await creationStep('portrait', true, async () => {
+    if ((await page.locator('#creation-body [data-value] img').count()) !== 3) errors.push('create-portrait: there are not three portraits');
+    await pick('/static/images/player_fighter.png');
+  });
+  await page.keyboard.press('Enter');
+
+  await page.waitForFunction(atStep, 'summary', { timeout: 10000 });
+  const summary = await page.evaluate(() => ({ text: document.getElementById('creation-body').textContent, next: document.getElementById('creation-next').textContent }));
+  for (const word of ['Smoke', 'Human', 'Fighter', 'Knight', 'Longsword', 'Chain Mail', 'Athletics, Perception', ...served.starting_abilities]) {
+    if (!summary.text.includes(word)) errors.push(`create-summary: "${word}" is missing`);
+  }
+  if (summary.next !== 'Begin the adventure') errors.push(`create-summary: the button reads "${summary.next}"`);
+  await shot('create-summary');
+
+  // Two steps back and forward again: every choice is kept.
+  const chosen = await choicesNow();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(atStep, 'armour', { timeout: 5000 });
+  await page.keyboard.press('Enter');
+  await page.click('#creation-next');
+  await page.waitForFunction(atStep, 'summary', { timeout: 5000 });
+  if ((await choicesNow()) !== chosen) errors.push(`create-summary: back and forward changed the choices to ${await choicesNow()}`);
+  if (chosen !== JSON.stringify({ race: 'Human', class_name: 'Fighter', skills: ['Athletics', 'Perception'], name: 'Smoke', weapon: 'Longsword', armor: 'Chain Mail', portrait: '/static/images/player_fighter.png' })) {
+    errors.push(`create-summary: the choices are ${chosen}`);
+  }
+
+  await page.click('#creation-next');
+  await page.waitForFunction(() => window.__aiv.screen === 'opening' && !document.getElementById('opening-panel').hidden, null, { timeout: 10000 });
+  const act = campaign.acts[0];
+  const read = await page.evaluate(() => ({
+    heading: document.getElementById('opening-heading').textContent, act: document.getElementById('opening-act').textContent,
+    text: [...document.querySelectorAll('#opening-text p')].map((p) => p.textContent), quest: document.getElementById('opening-quest').textContent,
+    creation: !document.getElementById('creation-panel').hidden, state: window.__aiv.state,
+  }));
+  if (read.heading !== campaign.title || read.act !== `Act 1: ${act.title}` || read.quest !== `Your quest: ${act.mainQuest}`
+    || JSON.stringify(read.text) !== JSON.stringify([campaign.description, act.description])) errors.push(`opening: it reads ${JSON.stringify(read).slice(0, 300)}`);
+  if (read.creation) errors.push('opening: the creation panel stays');
+  const made = read.state.character;
+  if (!made || made.name !== 'Smoke' || made.race !== 'Human' || made.class_name !== 'Fighter' || made.max_hit_points !== served.hit_points) errors.push(`opening: the character is ${JSON.stringify(made)}`);
+  await shot('opening');
+}
+
+const openMenu = async () => {
+  await page.keyboard.press('KeyM');
+  await page.waitForSelector('#menu', { state: 'visible', timeout: 5000 });
+};
+const settingsNow = () => page.evaluate(() => JSON.stringify(window.__aiv.settings));
+
+/** The settings panel: a change is in use at once and still there after a reload. Ends walking, with the defaults back. */
+async function settingsSteps() {
+  await openMenu();
+  if (await page.locator('#menu-saves').count()) errors.push('settings: the menu still links to the classic saves page');
+  await page.click('#menu-settings');
+  await page.waitForFunction(() => window.__aiv.settingsOpen && !document.getElementById('settings-panel').hidden && document.getElementById('menu').hidden, null, { timeout: 5000 });
+  if ((await settingsNow()) !== JSON.stringify({ sensitivity: 1, invertY: false, fov: 70 })) errors.push(`settings: they start as ${await settingsNow()}`);
+  if ((await page.locator('#settings-keys > *').count()) !== 11) errors.push('settings: the key list does not have eleven lines');
+  await page.fill('#set-fov', '90');
+  await page.check('#set-invert-y');
+  const changed = JSON.stringify({ sensitivity: 1, invertY: true, fov: 90 });
+  if ((await settingsNow()) !== changed) errors.push(`settings: after the change they are ${await settingsNow()}`);
+  if ((await page.evaluate(() => localStorage.getItem('aiv.settings'))) !== changed) errors.push('settings: the change is not in localStorage');
+  await page.waitForTimeout(200);
+  await shot('settings');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !window.__aiv.settingsOpen && !document.getElementById('menu').hidden && window.__aiv.menuOpen, null, { timeout: 5000 })
+    .catch(() => errors.push('settings: Esc does not lead back to the menu'));
+
+  await page.reload({ waitUntil: 'load', timeout: 30000 });
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready, null, { timeout: 30000 });
+  if ((await settingsNow()) !== changed) errors.push(`settings: after a reload they are ${await settingsNow()}`);
+  await page.waitForSelector('#btn-continue', { state: 'visible', timeout: 10000 });
+  await enterWorld();
+
+  // Back to the defaults, so that the rest of the walk-through looks as it always did.
+  await openMenu();
+  await page.click('#menu-settings');
+  await page.waitForFunction(() => window.__aiv.settingsOpen, null, { timeout: 5000 });
+  await page.fill('#set-fov', '70');
+  await page.uncheck('#set-invert-y');
+  await page.click('#settings-close');
+  await page.click('#menu-back');
+  await page.waitForFunction(() => !window.__aiv.menuOpen, null, { timeout: 5000 });
+  if ((await settingsNow()) !== JSON.stringify({ sensitivity: 1, invertY: false, fov: 70 })) errors.push(`settings: the defaults are not back: ${await settingsNow()}`);
+}
+
+/** Opens the save slots from the menu in `mode` and waits for the panel. */
+async function openSlots(mode) {
+  await openMenu();
+  await page.click(mode === 'save' ? '#menu-save' : '#menu-load');
+  await page.waitForFunction((m) => window.__aiv.saves?.mode === m && !document.getElementById('saves-panel').hidden && document.getElementById('menu').hidden, mode, { timeout: 10000 });
+}
+
+const slotMessage = (text) => page.waitForFunction((t) => {
+  const line = document.querySelector('#saves-panel .panel-message');
+  return !line.hidden && line.textContent === t;
+}, text, { timeout: 10000 });
+
+/** With --serve: the session file the browser's cookie names is the only one kept (a load makes a new one). */
+async function keepCurrentSession() {
+  const cookie = (await context.cookies()).find((c) => c.name === 'session');
+  const id = JSON.parse(Buffer.from(cookie.value.split('.')[0], 'base64').toString('utf8')).session_id;
+  const folder = join(dataDir, 'sessions');
+  for (const file of readdirSync(folder)) if (file.endsWith('.json') && file !== `${id}.json`) unlinkSync(join(folder, file));
+}
+
+/** Save into an empty slot, change the game, back away from overwriting, load the save, delete it. Ends walking. */
+async function saveSteps() {
+  await openSlots('save');
+  const before = await page.evaluate(() => window.__aiv.saves.view);
+  const rows = await page.locator('#saves-slots .save-slot').count();
+  if (rows !== Math.max(before.max_saves, before.saves.length) || before.max_saves !== 10) errors.push(`save-panel: ${rows} rows for ${before.max_saves} slots`);
+  if (before.saves.length >= before.max_saves) {
+    console.log('skipped (the server already holds 10 saves): save-panel, save-confirm, load-panel');
+    await page.keyboard.press('Escape');
+    await page.click('#menu-back');
+    return;
+  }
+  await page.click('#saves-slots .save-slot.empty button[data-action="save"]');
+  await slotMessage('Game saved.');
+  const after = await page.evaluate(() => window.__aiv.saves.view);
+  const mine = after.saves.find((s) => !before.saves.some((old) => old.id === s.id));
+  if (!mine || after.saves.length !== before.saves.length + 1) throw new Error('save-panel: the new save is not in the list');
+  const row = `#saves-slots .save-slot[data-save-id="${mine.id}"]`;
+  const line = await page.textContent(`${row} .save-line`);
+  if (line !== `Smoke · Level 1 Human Fighter · Rivermeet Town · ${mine.saved_at.slice(0, 16).replace('T', ' ')}`) errors.push(`save-panel: the row reads "${line}"`);
+  await shot('save-panel');
+  const saved = await page.evaluate(() => ({ area: window.__aiv.state.area.id, character: window.__aiv.state.character }));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => window.__aiv.saves === null && !document.getElementById('menu').hidden, null, { timeout: 5000 }).catch(() => errors.push('save-panel: Esc does not lead back to the menu'));
+  await page.click('#menu-back');
+
+  // Something changes: through the first gate into the next area, and with --serve the purse.
+  const gate = await page.evaluate(() => {
+    const g = window.__aiv.layout.gates[0];
+    window.__aiv.lookAt(g.x, g.z);
+    return g;
+  });
+  await page.keyboard.down('KeyW');
+  await page.waitForFunction((id) => window.__aiv.state.area.id === id && window.__aiv.screen === 'world' && !window.__aiv.loading && window.__aiv.player !== null, gate.exitId, { timeout: 60000 });
+  await page.keyboard.up('KeyW');
+  if (serve) {
+    editSession((session) => {
+      session.character.gold += 500;
+    });
+  }
+
+  // Overwrite asks first, and No sends nothing.
+  await openSlots('save');
+  await page.click(`${row} button[data-action="overwrite"]`);
+  await page.waitForFunction(() => window.__aiv.saves.confirm?.action === 'overwrite' && !document.getElementById('saves-confirm').hidden, null, { timeout: 5000 });
+  if ((await page.textContent('#saves-question')) !== 'Overwrite this save?') errors.push(`save-confirm: the question reads "${await page.textContent('#saves-question')}"`);
+  await shot('save-confirm');
+  await page.click('#saves-no');
+  await page.waitForFunction(() => window.__aiv.saves.confirm === null && document.getElementById('saves-confirm').hidden, null, { timeout: 5000 });
+  const kept = await page.evaluate(() => fetch('/api/saves').then((r) => r.json()));
+  if (kept.saves.find((s) => s.id === mine.id)?.saved_at !== mine.saved_at) errors.push('save-confirm: No overwrote the save');
+  await page.keyboard.press('Escape');
+  await page.click('#menu-back');
+
+  // Load: the game is the saved one again.
+  await openSlots('load');
+  if ((await page.locator('#saves-slots .save-slot.empty button').count()) !== 0) errors.push('load-panel: an empty row has a button');
+  if ((await page.locator(`${row} button[data-action="overwrite"]`).count()) !== 0) errors.push('load-panel: a row offers Overwrite');
+  await shot('load-panel');
+  await page.click(`${row} button[data-action="load"]`);
+  await page.waitForFunction((id) => window.__aiv.saves === null && window.__aiv.state?.area?.id === id && window.__aiv.screen === 'world' && !window.__aiv.loading && window.__aiv.player !== null && !window.__aiv.menuOpen, saved.area, { timeout: 60000 });
+  const loaded = await page.evaluate(() => ({ character: window.__aiv.state.character, kept: sessionStorage.getItem('aiv.return') }));
+  if (JSON.stringify(loaded.character) !== JSON.stringify(saved.character)) errors.push(`load-panel: the character is ${JSON.stringify(loaded.character)}, saved was ${JSON.stringify(saved.character)}`);
+  if (loaded.kept !== null) errors.push('load-panel: aiv.return is kept after a load');
+  const told = await page.evaluate(() => fetch('/api/state').then((r) => r.json()));
+  if (told.area.id !== saved.area || JSON.stringify(told.character) !== JSON.stringify(saved.character)) errors.push('load-panel: the server does not hold the saved game');
+  if (serve) await keepCurrentSession();
+  await worldShot('loaded');
+
+  // Delete asks first; Yes takes the save away.
+  await openSlots('load');
+  await page.click(`${row} button[data-action="delete"]`);
+  await page.waitForFunction(() => window.__aiv.saves.confirm?.action === 'delete', null, { timeout: 5000 });
+  if ((await page.textContent('#saves-question')) !== 'Delete this save?') errors.push(`delete: the question reads "${await page.textContent('#saves-question')}"`);
+  await page.click('#saves-yes');
+  await slotMessage('Save deleted.');
+  if ((await page.locator(row).count()) !== 0) errors.push('delete: the row is still there');
+  const left = await page.evaluate(() => fetch('/api/saves').then((r) => r.json()));
+  if (left.saves.some((s) => s.id === mine.id)) errors.push('delete: the server still lists the save');
+  await page.click('#saves-close');
+  await page.click('#menu-back');
+  await page.waitForFunction(() => !window.__aiv.menuOpen, null, { timeout: 5000 });
+}
+
+/** Quit to title from the menu: New game and Continue are offered, and nothing was sent. */
+async function quitToTitle() {
+  await openMenu();
+  const posts = [];
+  const note = (request) => request.method() === 'POST' && posts.push(request.url());
+  page.on('request', note);
+  await page.click('#menu-quit');
+  await page.waitForFunction(() => window.__aiv.screen === 'title' && !document.getElementById('title-screen').hidden && !window.__aiv.menuOpen, null, { timeout: 5000 });
+  await page.waitForTimeout(300);
+  page.off('request', note);
+  if (posts.length) errors.push(`title-after-quit: quitting posted to ${posts.join(', ')}`);
+  for (const id of ['#btn-new-game', '#btn-continue']) if (!(await page.isVisible(id))) errors.push(`title-after-quit: ${id} is not offered`);
+  if (await page.isVisible('#hud')) errors.push('title-after-quit: the HUD stays');
+  if (serve && (await page.isVisible('#btn-load-game'))) errors.push('title-after-quit: Load game is offered without a save');
+  await shot('title-after-quit');
+}
+
 try {
   // 1. The 3D client loads and draws; without a character it offers a new game.
   await page.goto(url, { waitUntil: 'load', timeout: 30000 });
@@ -540,7 +837,9 @@ try {
   if (await page.isVisible('#loading')) errors.push('the loading indicator is visible on the title screen');
   await page.waitForTimeout(500);
   const variety = await canvasVariety();
-  await shot('title');
+  await shot('title-new');
+  if (await page.locator('#btn-new-game').evaluate((b) => b.tagName !== 'BUTTON' || b.hasAttribute('href'))) errors.push('New game is not a button');
+  if (serve && (await page.isVisible('#btn-load-game'))) errors.push('Load game is offered without a save');
   if (variety < 0.05) errors.push(`the 3D view is blank: only ${(variety * 100).toFixed(1)}% of sampled pixels differ from the background`);
 
   // 2. The classic interface still answers.
@@ -548,19 +847,31 @@ try {
   await page.waitForSelector('.home-hero', { timeout: 10000 });
   await shot('classic-home');
 
-  // 3. A character, made through the classic routes in this browser.
-  await post('/character/race', [['race', 'Human']]);
-  await post('/character/class', [['class_name', 'Fighter']]);
-  await post('/character/create', [['name', 'Smoke'], ['weapon', 'Longsword'], ['armor', 'Chain Mail'], ['skills', 'Athletics'], ['skills', 'Perception']]);
+  // 3. A character, made in the creation panel with clicks and typed keys, then the opening.
+  await page.goto(url, { waitUntil: 'load', timeout: 30000 });
+  await page.waitForFunction(() => window.__aiv && window.__aiv.ready && window.__aiv.frames > 5, null, { timeout: 30000 });
+  await page.waitForSelector('#btn-new-game', { state: 'visible', timeout: 10000 });
+  await createCharacter();
 
-  // 4. The title screen now offers to continue.
-  await openTitle();
-  if (await page.isVisible('#btn-new-game')) errors.push('New game is still offered with a character');
-  await shot('title-continue');
+  // 4. The opening leads into the town square the character starts in, and the player walks.
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(inWorld, null, { timeout: 60000 });
+  const begun = await page.evaluate(() => ({ area: window.__aiv.state.area.id, location: window.__aiv.state.location.name, opening: window.__aiv.opening, panel: !document.getElementById('opening-panel').hidden, player: window.__aiv.player }));
+  if (begun.area !== 'town_square' || begun.location !== 'Rivermeet Town') errors.push(`a new character starts in ${begun.area} of ${begun.location}, not in the town square of Rivermeet Town`);
+  if (begun.opening !== null || begun.panel) errors.push('the opening stays after Continue');
+  await page.keyboard.down('KeyW');
+  await page.waitForFunction((from) => window.__aiv.player && Math.hypot(window.__aiv.player.x - from.x, window.__aiv.player.z - from.z) > 0.5, begun.player, { timeout: 10000 })
+    .catch(() => errors.push('after the opening the player does not walk'));
+  await page.keyboard.up('KeyW');
 
-  // 5. Into the world, in the town square the character starts in.
+  // 4a. Settings, save, load, delete and quit, all from the menu.
+  await settingsSteps();
+  await saveSteps();
+  await quitToTitle();
+
+  // 5. Into the world again with Continue.
   const start = await enterWorld();
-  if (start.area.id !== 'town_square') errors.push(`a new character starts in ${start.area.id}, not in town_square`);
+  if (start.area.id !== 'town_square') errors.push(`after the load and Continue the character is in ${start.area.id}, not in town_square`);
   await worldShot('loc-rivermeet-town');
 
   // 5a. The signpost of the town square: the prompt, the map of the realm, a locked act.

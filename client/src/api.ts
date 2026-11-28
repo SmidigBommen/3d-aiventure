@@ -1,6 +1,8 @@
 // The server's JSON API. The server decides everything; this only carries it.
 
 import type { BattleAction, BattleView } from './battle/view';
+import type { CreationView, NewGameBody, Opening, PreviewView } from './creation';
+import type { SavesView } from './saves';
 import type { EndingView, JournalView, TravelView } from './world/campaign';
 import type { AreaContents } from './world/contents';
 import type { EventResult, EventView } from './world/event';
@@ -241,6 +243,50 @@ export type EndingAnswer = { ok: true; ending: EndingView; state: WorldState } |
 export async function fetchEnding(): Promise<EndingAnswer> {
   const answer = await get<{ ending: EndingView; state: WorldState }>('/api/ending');
   return answer.ok ? { ok: true, ending: answer.value.ending, state: answer.value.state } : answer;
+}
+
+// --- character creation and the save slots ---
+
+export type CreationAnswer = { ok: true; creation: CreationView } | Refusal;
+
+/** Everything the creation steps show. */
+export async function fetchCreation(): Promise<CreationAnswer> {
+  const answer = await get<CreationView>('/api/creation');
+  return answer.ok ? { ok: true, creation: answer.value } : answer;
+}
+
+export type PreviewAnswer = { ok: true; preview: PreviewView } | Refusal;
+
+/** What a character of this race and class will be. */
+export async function fetchPreview(race: string, className: string): Promise<PreviewAnswer> {
+  const answer = await get<PreviewView>(`/api/creation/preview?race=${encodeURIComponent(race)}&class_name=${encodeURIComponent(className)}`);
+  return answer.ok ? { ok: true, preview: answer.value } : answer;
+}
+
+export type NewGameAnswer = { ok: true; state: WorldState; opening: Opening } | Refusal;
+
+/** Creates the character and starts a new game with it. */
+export async function postNewGame(body: NewGameBody): Promise<NewGameAnswer> {
+  const answer = await post<{ state: WorldState; opening: Opening }>('/api/new-game', body);
+  return answer.ok ? { ok: true, state: answer.value.state, opening: answer.value.opening } : answer;
+}
+
+export type SavesAnswer = { ok: true; saves: SavesView } | Refusal;
+
+export async function fetchSaves(): Promise<SavesAnswer> {
+  const answer = await get<SavesView>('/api/saves');
+  return answer.ok ? { ok: true, saves: answer.value } : answer;
+}
+
+/** `state` comes with a load: the game that was saved, now this session's. */
+export type SaveActionAnswer = { ok: true; saves: SavesView; message: string; state: WorldState | null } | Refusal;
+type SaveBody = { saves: SavesView; message: string; state?: WorldState };
+
+/** Saving into a new slot (`id` null) or over a save, loading a save, deleting one. */
+export async function postSave(action: 'save' | 'load' | 'delete', id: string | null): Promise<SaveActionAnswer> {
+  const path = id === null ? '/api/saves' : `/api/saves/${encodeURIComponent(id)}${action === 'save' ? '' : `/${action}`}`;
+  const answer = await post<SaveBody>(path);
+  return answer.ok ? { ok: true, saves: answer.value.saves, message: answer.value.message, state: answer.value.state ?? null } : answer;
 }
 
 // --- the fight ---

@@ -39,6 +39,7 @@ import uvicorn  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import web.game_session as gs  # noqa: E402
+from web import creation  # noqa: E402
 from web.app import app  # noqa: E402
 
 DEFAULT_CHROME = "flatpak run --filesystem={out} com.google.Chrome"
@@ -120,8 +121,11 @@ class Tour:
         self.shot("class", "/character/class")
         c.post("/character/class", data={"class_name": class_name})
         self.shot("details", "/character/details")
+        # Creation refuses what the class may not choose: fall back to its first weapon and no armour.
+        weapon = "Longsword" if "Longsword" in creation.allowed_weapons(class_name) else creation.allowed_weapons(class_name)[0]
+        armor = "Chain Mail" if "Chain Mail" in creation.allowed_armors(class_name) else ""
         c.post("/character/create", data={
-            "name": "Aldric", "weapon": "Longsword", "armor": "Chain Mail",
+            "name": "Aldric", "weapon": weapon, "armor": armor,
             "portrait": "/static/images/player_fighter.png"})
         self.shot("summary", "/character/summary")
 

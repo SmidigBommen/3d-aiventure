@@ -1,6 +1,7 @@
 // The HTML panels over the 3D view: title screen, heads-up display and menu. Shows what it is given.
 
 import type { WorldState } from './api';
+import { titleButtons } from './saves';
 import { asiBadge } from './world/sheet';
 import { showQuests } from './world/shopPanel';
 
@@ -18,15 +19,18 @@ const DANGER_TEXT: Record<string, string> = { safe: 'Safe', low: 'Low', med: 'Me
 const DESCRIPTION_SECONDS = 6;
 
 /** The title panel for a state, or for no answer from the server (`null`). */
-export function showTitle(state: WorldState | null): void {
+export function showTitle(state: WorldState | null, saveCount = 0): void {
+  const offered = state === null ? [] : titleButtons(state.has_character, saveCount);
   const pending = state?.pending ?? null;
   const message = el('title-message');
   const link = el<HTMLAnchorElement>('pending-link');
   show(el('title-screen'), true);
   show(el('hud'), false);
   show(el('menu'), false);
-  show(el('btn-new-game'), state !== null && !state.has_character);
-  show(el('btn-continue'), state !== null && state.has_character && !pending);
+  show(el('btn-new-game'), offered.includes('new'));
+  // With something pending the way on is the pending link.
+  show(el('btn-continue'), offered.includes('continue') && !pending);
+  show(el('btn-load-game'), offered.includes('load'));
   show(el('classic-link'), state === null);
   show(link, pending !== null);
   show(message, state === null || pending !== null);
