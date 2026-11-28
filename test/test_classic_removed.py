@@ -150,6 +150,22 @@ class TestFiles:
         assert not hasattr(game_session, "get_battle_sprites")
         assert not hasattr(game_session, "get_monster_portraits")
 
+    def test_leftover_bytecode_of_a_removed_package_is_cleared(self, tmp_path):
+        # An older checkout leaves ignored bytecode behind, and Python imports the folder as a package.
+        import conftest
+        name = conftest.REMOVED_PACKAGES[0]
+        stale = tmp_path / name / "__pycache__"
+        stale.mkdir(parents=True)
+        (stale / "game.cpython-313.pyc").write_bytes(b"\0")
+        assert conftest.clear_removed_packages(tmp_path) == [tmp_path / name]
+        assert not (tmp_path / name).exists()
+        # Anything else in the folder is somebody's work: it stays.
+        stale.mkdir(parents=True)
+        (stale / "game.cpython-313.pyc").write_bytes(b"\0")
+        (tmp_path / name / "notes.txt").write_text("keep", encoding="utf-8")
+        assert conftest.clear_removed_packages(tmp_path) == []
+        assert (tmp_path / name / "notes.txt").is_file()
+
     def test_no_python_file_names_what_was_removed(self):
         # Spelled in pieces, so that this file does not contain them itself.
         gone = ("web." + "routes", "Jinja2" + "Templates", "Template" + "Response")
